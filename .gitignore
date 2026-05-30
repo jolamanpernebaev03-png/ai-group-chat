@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+start_bot.sh
+*.save
+test_*.py
+*.json
