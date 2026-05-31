@@ -1,3 +1,9 @@
+import os
+print("=== RAILWAY ENV VARIABLES ===")
+for key in ["CLAUDE_TG_TOKEN", "DEEPSEEK_TG_TOKEN", "GROQ_TG_TOKEN", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GROUP_CHAT_ID"]:
+    value = os.getenv(key)
+    print(f"{key}: {'✓ SET' if value else '✗ MISSING'}")
+
 """
 🤖 Multi-AI Telegram Group Chat — v2
 ======================================
