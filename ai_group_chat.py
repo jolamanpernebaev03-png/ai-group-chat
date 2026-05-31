@@ -72,7 +72,7 @@ BOT_CONFIGS = [
         "name": "Claude",          "icon": "🟣",
         "telegram_token": os.getenv("CLAUDE_TG_TOKEN"),
         "api_type": "anthropic",   "api_key": os.getenv("ANTHROPIC_API_KEY", "").strip(),
-        "model": "claude-sonnet-4-20250514",  "temperature": 0.7,
+        "model": "claude-sonnet-4-5",  "temperature": 0.7,
         "prompt": (
             "You are extremely intelligent. Speak like a confident smart person in casual conversation — "
             "no bullet points, no numbered lists, no academic citations, no formal structure. "
