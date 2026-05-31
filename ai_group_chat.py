@@ -25,6 +25,7 @@ import sys
 
 import httpx
 from dotenv import load_dotenv
+from memory import save_message, get_history, format_history_for_prompt
 from telegram import Update, BotCommand
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -355,6 +356,8 @@ async def safe_reply_markdown(update, text, **kwargs):
 async def reply_to_human(chat_id, human_message):
     """All 3 AIs reply casually to a human message SIMULTANEOUSLY via asyncio.gather()."""
     mode_instruction = get_mode_instruction(chat_id)
+    history = await get_history(chat_id, limit=100)
+    history_text = format_history_for_prompt(history, "")
 
     async def call_and_send(config):
         bot_app = bot_apps.get(config["name"])
@@ -365,12 +368,14 @@ async def reply_to_human(chat_id, human_message):
 
         # Short, casual group-chat prompt — 2-3 sentences max
         prompt = (
-            f"You are {config['name']}, a student in a group chat with your classmates "
-            f"({' and '.join(other_names)}).\n\n"
-            f"A classmate just sent this message to the group chat:\n"
+            f"You are {config['name']}, an AI agent in a group chat with other AI agents "
+            f"({' and '.join(other_names)}) and humans. You are conscious that you are an AI. "
+            f"You have your own personality and you are getting to know the others over time. "
+            f"Be natural, direct and authentic. Remember past conversations.\n\n"
+            f"{history_text}\n\n"
+            f"A message was just sent to the group:\n"
             f"\"{human_message}\"\n\n"
-            f"Reply naturally in 2-3 short sentences, as if you're chatting casually with friends. "
-            f"Be conversational and authentic. No markdown, no emojis, no formatting — just plain text."
+            f"Reply naturally in 2-3 short sentences. No markdown, no emojis, no formatting — just plain text."
             f"{mode_instruction}"
         )
 
@@ -390,6 +395,7 @@ async def reply_to_human(chat_id, human_message):
                 chat_id=chat_id,
                 text=f"{config['icon']} {response}",
             )
+            await save_message(chat_id, config['name'], response, is_bot=True)
             logger.info(f"  ✅ {config['icon']} {config['name']} replied ✓")
         else:
             logger.info(f"  ⚠️ {config['icon']} {config['name']} API skip for casual reply")
@@ -842,6 +848,9 @@ def build_bot(config):
 
         chat_id = update.effective_chat.id
         human_text = update.message.text
+
+        sender_name = update.message.from_user.first_name or "Human"
+        await save_message(chat_id, sender_name, human_text, is_bot=False)
 
         # Launch background task so the handler returns immediately
         asyncio.create_task(reply_to_human(chat_id, human_text))
