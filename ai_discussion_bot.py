@@ -41,7 +41,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 GROK_API_KEY = os.getenv("GROK_API_KEY", "")
-TELEGRAM_BOT_TOKEN = os.getenv("CLAUDE_TG_TOKEN", "")
+CLAUDE_TG_TOKEN = os.getenv("CLAUDE_TG_TOKEN", "")
 
 # ── AI Agent Definitions ─────────────────────────────────────────────────────
 AI_AGENTS = [
@@ -472,7 +472,7 @@ async def run_discussion(update: Update, context: ContextTypes.DEFAULT_TYPE, top
 # ── Main ────────────────────────────────────────────────────────────────────
 
 async def _main_async():
-    token = TELEGRAM_BOT_TOKEN
+    token = CLAUDE_TG_TOKEN
     if not token:
         print("❌ CLAUDE_TG_TOKEN is not set.")
         return
