@@ -1,0 +1,18 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+
+# Test files
+test_*.py
+
+# Generated reports
+*.json
