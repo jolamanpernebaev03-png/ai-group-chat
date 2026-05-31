@@ -116,7 +116,6 @@ BOT_CONFIGS.sort(key=lambda b: b["order"])
 async def call_anthropic(api_key, system, messages, model, temperature):
     try:
         async with httpx.AsyncClient(timeout=180) as client:
-            logger.info(f"DEBUG key repr: {repr(api_key)}")
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
