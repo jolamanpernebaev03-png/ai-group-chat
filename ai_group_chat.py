@@ -23,6 +23,8 @@ from telegram import Update, BotCommand
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+print("🚀 BOT STARTING ON RAILWAY")
+
 load_dotenv()
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger(__name__)
@@ -821,7 +823,7 @@ def build_bot(config):
         }
 
         await update.message.reply_text(
-            f"🎭 Mode changed to *{mode}*\n\n{mode_descriptions.get(mode, '')}",
+            f"🎭 Mode changed to *{mode}\n\n{mode_descriptions.get(mode, '')}",
             parse_mode="Markdown",
         )
         logger.info(f"  🎭 Chat {chat_id} mode set to '{mode}'")
