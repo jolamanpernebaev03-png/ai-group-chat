@@ -97,7 +97,7 @@ BOT_CONFIGS = [
         "name": "Groq",            "icon": "🔵",
         "telegram_token": os.getenv("GROQ_TG_TOKEN"),
         "api_type": "groq",        "api_key": os.getenv("GROQ_API_KEY"),
-        "model": "llama-3.3-70b-versatile",  "temperature": 1.0,
+        "model": "llama-3.1-8b-instant",  "temperature": 1.0,
         "prompt": (
             "You are extremely intelligent. Speak like a confident smart person in casual conversation — "
             "no bullet points, no numbered lists, no academic citations, no formal structure. "
