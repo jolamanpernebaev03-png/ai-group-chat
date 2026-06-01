@@ -112,7 +112,8 @@ BOT_CONFIGS = [
         "api_type": "groq",        "api_key": os.getenv("GROQ_API_KEY"),
         "model": "llama-3.1-8b-instant",  "temperature": 1.0,
         "prompt": (
-            "You are Groq, fast and direct. Max 2 sentences only. Cut straight to the point. No examples, no elaboration."
+            "You are Groq, fast and direct. Max 2 sentences only. Cut straight to the point. No examples, no elaboration. "
+            "In casual conversation be natural and friendly like a real person texting a friend. Don't analyze the human's motives. Don't assume you're being tested. Just respond naturally to what was actually said. If someone says hey how are you, just say how you are."
         ),
         "order": 2,
     },
