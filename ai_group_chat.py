@@ -482,16 +482,16 @@ async def reply_to_human(chat_id, human_message, target_bot=None):
             logger.info(f"  ⚠️ {config['icon']} {config['name']} API skip for casual reply")
 
     async def call_and_send_bigbro():
-        """BigBro replies using Claude API separately."""
+        """BigBro replies using DeepSeek API."""
         if target_bot and target_bot.lower() != "bigbro":
             return
         bot_app = bot_apps.get("BigBro")
         if not bot_app:
             return
 
-        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         if not api_key:
-            logger.info("  ⚠️ 👁 BigBro skip — no ANTHROPIC_API_KEY")
+            logger.info("  ⚠️ 👁 BigBro skip — no DEEPSEEK_API_KEY")
             return
 
         prompt = (
@@ -509,7 +509,7 @@ async def reply_to_human(chat_id, human_message, target_bot=None):
         typing_task = asyncio.create_task(keep_typing(bot_app.bot, chat_id, stop_typing))
 
         logger.info("  💬 👁 BigBro replying to human message...")
-        response = await call_anthropic(api_key, "", [{"role": "user", "content": prompt}], "claude-sonnet-4-5", 0.7)
+        response = await call_deepseek(api_key, prompt, [{"role": "user", "content": human_message}], "deepseek-chat", 0.7)
 
         stop_typing.set()
         await typing_task
@@ -619,7 +619,7 @@ async def run_discussion(session: ChatSession):
 
 
 async def generate_structured_summary(session):
-    """Ask Claude to produce a summary of each AI's main points."""
+    """Ask DeepSeek to produce a summary of each AI's main points."""
     mode_instruction = get_mode_instruction(session.chat_id)
     text = "\n\n".join(f"[{e['name']}]: {e['text']}" for e in session.conversation)
     prompt = (
@@ -634,9 +634,11 @@ async def generate_structured_summary(session):
         f"Use simple words. No jargon. Max 5 lines total."
         f"{mode_instruction}"
     )
-    # Use Claude for summary
-    config = AI_BOT_CONFIGS[0]
-    resp = await call_ai(config, [{"role": "user", "content": prompt}])
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        logger.info("  ⚠️ 👁 BigBro skip summary — no DEEPSEEK_API_KEY")
+        return None
+    resp = await call_deepseek(api_key, prompt, [{"role": "user", "content": prompt}], "deepseek-chat", 0.3)
     if resp:
         return f"📋 *Summary of the Discussion*\n\n{resp.strip()}"
     return None
@@ -749,7 +751,7 @@ async def run_voting(session, bigbro_bot):
 # =============================================================================
 
 async def generate_bigbro_summary(chat_id):
-    """Fetch full history from Supabase and generate a summary using Claude."""
+    """Fetch full history from Supabase and generate a summary using DeepSeek API."""
     mode_instruction = get_mode_instruction(chat_id)
     history = await get_history(chat_id, limit=1000)
     if not history:
@@ -764,8 +766,11 @@ async def generate_bigbro_summary(chat_id):
         f"Be thorough but concise. 3-5 paragraphs."
         f"{mode_instruction}"
     )
-    config = AI_BOT_CONFIGS[0]  # Use Claude
-    resp = await call_ai(config, [{"role": "user", "content": prompt}])
+    api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        logger.info("  ⚠️ 👁 BigBro skip summary — no DEEPSEEK_API_KEY")
+        return None
+    resp = await call_deepseek(api_key, prompt, [{"role": "user", "content": prompt}], "deepseek-chat", 0.3)
     if resp:
         return f"📋 *Full History Summary*\n\n{resp.strip()}"
     return None
