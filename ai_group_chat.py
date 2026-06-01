@@ -23,6 +23,7 @@ import logging
 import os
 import random
 import sys
+import time
 
 import httpx
 from dotenv import load_dotenv
@@ -312,6 +313,7 @@ chat_modes = {}      # chat_id -> mode string (e.g. "sarcastic", "eli5")
 bot_apps = {}        # name -> Application
 processed_messages = set()  # deduplicate handling of same message_id
 active_conversation = {}  # chat_id -> bot name currently in conversation
+groq_rate_limited = {}  # chat_id -> timestamp when Groq last notified rate limit
 
 
 # =============================================================================
@@ -480,6 +482,16 @@ async def reply_to_human(chat_id, human_message, target_bot=None):
             logger.info(f"  ✅ {config['icon']} {config['name']} replied ✓")
         else:
             logger.info(f"  ⚠️ {config['icon']} {config['name']} API skip for casual reply")
+            # Groq rate-limit notification — once per 60 seconds per chat
+            if config['name'] == 'Groq':
+                now = time.time()
+                last_notified = groq_rate_limited.get(chat_id, 0)
+                if now - last_notified > 60:
+                    groq_rate_limited[chat_id] = now
+                    await bot_app.bot.send_message(
+                        chat_id=chat_id,
+                        text="🔵 Groq is taking a breather (rate limit). Back soon.",
+                    )
 
     async def call_and_send_bigbro():
         """BigBro replies using DeepSeek API."""
@@ -874,6 +886,27 @@ def build_bot(config):
             else:
                 await update.message.reply_text("❌ Could not generate summary (no history or API unavailable).")
 
+        async def cmd_topics(update, context):
+            chat_id = update.effective_chat.id
+            api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+            if not api_key:
+                await update.message.reply_text("❌ DeepSeek API key not configured.")
+                return
+
+            await update.message.reply_text("💡 Generating sharp discussion topics...")
+            prompt = (
+                "Generate 5 sharp, controversial, thought-provoking discussion topics for a group of highly intelligent AI agents. "
+                "Topics should spark genuine disagreement. "
+                "Format exactly like this:\n"
+                "1. [topic]\n2. [topic]\n3. [topic]\n4. [topic]\n5. [topic]\n"
+                "No explanations, just the topics."
+            )
+            resp = await call_deepseek(api_key, prompt, [{"role": "user", "content": prompt}], "deepseek-chat", 0.7)
+            if resp:
+                await safe_send(app.bot, chat_id, f"💡 *Topics to discuss:*\n\n{resp.strip()}\n\nPick one and send /discuss <topic>")
+            else:
+                await update.message.reply_text("❌ Could not generate topics.")
+
         async def cmd_vote(update, context):
             chat_id = update.effective_chat.id
             sess = sessions.get(chat_id)
@@ -934,6 +967,7 @@ def build_bot(config):
 
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("discuss", cmd_discuss))
+        app.add_handler(CommandHandler("topics", cmd_topics))
         app.add_handler(CommandHandler("stop", cmd_stop))
         app.add_handler(CommandHandler("summary", cmd_summary))
         app.add_handler(CommandHandler("vote", cmd_vote))
