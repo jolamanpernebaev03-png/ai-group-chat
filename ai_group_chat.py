@@ -307,6 +307,7 @@ class ChatSession:
 sessions = {}        # chat_id -> ChatSession
 chat_modes = {}      # chat_id -> mode string (e.g. "sarcastic", "eli5")
 bot_apps = {}        # name -> Application
+processed_messages = set()  # deduplicate handling of same message_id
 
 
 # =============================================================================
@@ -508,6 +509,7 @@ async def run_discussion(session: ChatSession):
                 await asyncio.sleep(0.5)
                 await bot_app.bot.send_message(chat_id=session.chat_id, text=chunk)
             session.conversation.append({"name": config["name"], "text": response})
+            await save_message(session.chat_id, config['name'], response, is_bot=True)
             logger.info(f"  ✅ {config['icon']} {config['name']} ✓ ({len(response)} chars)")
         else:
             await safe_send(bot_app.bot, session.chat_id, f"{config['icon']} *{config['name']}* — ⚠️ API skip")
@@ -599,7 +601,8 @@ async def run_voting(session, bigbro_bot):
             f"The discussion was about: {session.topic}\n"
             f"Here are the arguments made:\n{text}\n"
             f"Who made the strongest argument — Claude, DeepSeek, or Groq? "
-            f"Answer in one sentence: '[Name] made the strongest argument because [one simple reason].'"
+            f"Answer in one sentence: '[Name] made the strongest argument because [one simple reason].'\n"
+            f"Important: You cannot vote for yourself. If you are Claude, you must vote for either DeepSeek or Groq."
         )
 
         stop_typing = asyncio.Event()
@@ -825,6 +828,11 @@ def build_bot(config):
 
         # BigBro also handles casual messages
         async def handle_message(update, context):
+            msg_id = update.message.message_id
+            if msg_id in processed_messages:
+                return
+            processed_messages.add(msg_id)
+
             chat_id = update.effective_chat.id
             human_text = update.message.text
             sender_name = update.message.from_user.first_name or "Human"
@@ -901,6 +909,11 @@ def build_bot(config):
         # Only the first AI bot triggers the casual reply cascade
         if config["order"] != 0:
             return
+
+        msg_id = update.message.message_id
+        if msg_id in processed_messages:
+            return
+        processed_messages.add(msg_id)
 
         chat_id = update.effective_chat.id
         human_text = update.message.text
