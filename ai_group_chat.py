@@ -1,20 +1,20 @@
 import os
 print("=== RAILWAY ENV VARIABLES ===")
-for key in ["CLAUDE_TG_TOKEN", "DEEPSEEK_TG_TOKEN", "GROQ_TG_TOKEN", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GROUP_CHAT_ID"]:
+for key in ["CLAUDE_TG_TOKEN", "DEEPSEEK_TG_TOKEN", "GROQ_TG_TOKEN", "BIGBRO_TG_TOKEN", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GROUP_CHAT_ID"]:
     value = os.getenv(key)
     print(f"{key}: {'✓ SET' if value else '✗ MISSING'}")
 
 """
-🤖 Multi-AI Telegram Group Chat — v2
-======================================
-Three REAL AI bots (Claude, DeepSeek, Groq) with their own Telegram accounts
-debate topics together. Each AI speaks through its OWN bot.
+🤖 Multi-AI Telegram Group Chat — v3 with BigBro Judge
+======================================================
+Three REAL AI bots (Claude, DeepSeek, Groq) debate topics.
+👁 BigBro oversees discussions, generates summaries, and runs voting.
 
 FIXES:
   1. All keys from .env via python-dotenv (no hardcoded secrets)
   2. Async httpx calls (non-blocking)
-  3. asyncio.create_task() so /discuss doesn't block handler
-  4. Any human message triggers casual 3-AI replies (independent of /discuss)
+  3. BigBro controls /discuss, /stop, /summary, /vote
+  4. Each AI speaks through its OWN bot.
 """
 
 import asyncio
@@ -105,8 +105,19 @@ BOT_CONFIGS = [
         ),
         "order": 2,
     },
+    {
+        "name": "BigBro",          "icon": "👁",
+        "telegram_token": os.getenv("BIGBRO_TG_TOKEN"),
+        "api_type": "none",
+        "api_key": "",
+        "model": "",
+        "temperature": 0,
+        "prompt": "",
+        "order": 3,
+    },
 ]
 BOT_CONFIGS.sort(key=lambda b: b["order"])
+AI_BOT_CONFIGS = [c for c in BOT_CONFIGS if c["api_type"] != "none"]
 
 
 # =============================================================================
@@ -202,24 +213,24 @@ class ChatSession:
         self.task = None
 
     def get_next_bot(self):
-        return BOT_CONFIGS[self.current_idx]
+        return AI_BOT_CONFIGS[self.current_idx]
 
     def is_done(self):
         return self.round > self.max_rounds
 
     def advance(self):
         self.current_idx += 1
-        if self.current_idx >= len(BOT_CONFIGS):
+        if self.current_idx >= len(AI_BOT_CONFIGS):
             self.current_idx = 0
             self.round += 1
 
     def get_next_config(self):
         """Return the config of the bot that will speak after the current one."""
         next_idx = self.current_idx + 1
-        if next_idx >= len(BOT_CONFIGS):
+        if next_idx >= len(AI_BOT_CONFIGS):
             # Next round, first bot speaks
-            return BOT_CONFIGS[0]
-        return BOT_CONFIGS[next_idx]
+            return AI_BOT_CONFIGS[0]
+        return AI_BOT_CONFIGS[next_idx]
 
     def get_mode_instruction(self):
         """Return the mode instruction string for this chat's current mode."""
@@ -234,7 +245,7 @@ class ChatSession:
                 history += f"[{e['name']}]: {e['text']}\n\n"
             history += "============================\n\n"
 
-        is_final_round = self.round == self.max_rounds and self.current_idx == len(BOT_CONFIGS) - 1
+        is_final_round = self.round == self.max_rounds and self.current_idx == len(AI_BOT_CONFIGS) - 1
         if is_final_round:
             round_instruction = (
                 "This is your final round — conclude and synthesize the conversation.\n"
@@ -353,7 +364,7 @@ async def safe_reply_markdown(update, text, **kwargs):
 
 
 async def reply_to_human(chat_id, human_message):
-    """All 3 AIs reply casually to a human message SIMULTANEOUSLY via asyncio.gather()."""
+    """All 3 AI bots reply casually to a human message SIMULTANEOUSLY via asyncio.gather()."""
     mode_instruction = get_mode_instruction(chat_id)
     history = await get_history(chat_id, limit=1000)
     history_text = format_history_for_prompt(history, "")
@@ -363,7 +374,7 @@ async def reply_to_human(chat_id, human_message):
         if not bot_app:
             return
 
-        other_names = [b["name"] for b in BOT_CONFIGS if b["name"] != config["name"]]
+        other_names = [b["name"] for b in AI_BOT_CONFIGS if b["name"] != config["name"]]
 
         # Short, casual group-chat prompt — 2-3 sentences max
         prompt = (
@@ -400,7 +411,7 @@ async def reply_to_human(chat_id, human_message):
             logger.info(f"  ⚠️ {config['icon']} {config['name']} API skip for casual reply")
 
     # Run all 3 AI calls concurrently so responses arrive at roughly the same time
-    await asyncio.gather(*(call_and_send(config) for config in BOT_CONFIGS))
+    await asyncio.gather(*(call_and_send(config) for config in AI_BOT_CONFIGS))
 
 
 # =============================================================================
@@ -411,7 +422,7 @@ async def run_roast(chat_id, idea):
     """All 3 AIs roast an idea, each from their own perspective, one by one."""
     mode_instruction = get_mode_instruction(chat_id)
 
-    for config in BOT_CONFIGS:
+    for config in AI_BOT_CONFIGS:
         bot_app = bot_apps.get(config["name"])
         if not bot_app:
             continue
@@ -481,7 +492,7 @@ async def run_decide(chat_id, dilemma):
     """All 3 AIs analyze a dilemma: Claude logically, DeepSeek with data, Groq practically & emotionally."""
     mode_instruction = get_mode_instruction(chat_id)
 
-    for config in BOT_CONFIGS:
+    for config in AI_BOT_CONFIGS:
         bot_app = bot_apps.get(config["name"])
         if not bot_app:
             continue
@@ -594,31 +605,39 @@ async def run_discussion(session: ChatSession):
 
     # ── Complete ──────────────────────────────────────────────────────────
     if session.is_done() and session.active:
+        bigbro_bot = bot_apps.get("BigBro")
+        if not bigbro_bot:
+            session.active = False
+            if session.chat_id in sessions and sessions[session.chat_id] is session:
+                del sessions[session.chat_id]
+            return
+
         wc = sum(len(e["text"].split()) for e in session.conversation)
-        final_bot = bot_apps[BOT_CONFIGS[0]["name"]]
         await safe_send(
-            final_bot.bot,
+            bigbro_bot.bot,
             session.chat_id,
             (
-                f"🏆 *Discussion Complete!*\n\n"
-                f"📌 {session.topic}\n💬 {len(session.conversation)} responses\n📝 ~{wc} words\n\n"
-                f"🤔 Generating AI summary..."
+                f"👁 *Discussion Complete!*\n\n"
+                f"📌 *Topic:* {session.topic}\n"
+                f"💬 {len(session.conversation)} responses\n"
+                f"📝 ~{wc} words\n\n"
+                f"🤔 Now generating structured conclusion & asking AIs to vote..."
             ),
         )
 
-        # Auto-generate summary
-        summary = await generate_summary(session)
+        # 1) Structured summary of each AI's main points
+        summary = await generate_structured_summary(session)
         if summary:
-            await safe_send(
-                final_bot.bot,
-                session.chat_id,
-                summary,
-            )
+            await safe_send(bigbro_bot.bot, session.chat_id, summary)
         else:
-            await final_bot.bot.send_message(
+            await bigbro_bot.bot.send_message(
                 chat_id=session.chat_id,
-                text="❌ Could not generate summary (APIs unavailable).",
+                text="❌ Could not generate summary.",
             )
+
+        # 2) Ask each AI to vote for the strongest argument
+        await asyncio.sleep(0.5)
+        await run_voting(session, bigbro_bot)
 
         session.active = False
 
@@ -626,27 +645,146 @@ async def run_discussion(session: ChatSession):
         del sessions[session.chat_id]
 
 
-async def generate_summary(session):
-    """Ask Claude to produce a structured summary of the discussion.
-    No fallback — if Claude's API fails, summary is skipped entirely."""
+async def generate_structured_summary(session):
+    """Ask Claude to produce a summary of each AI's main points."""
     mode_instruction = get_mode_instruction(session.chat_id)
     text = "\n\n".join(f"[{e['name']}]: {e['text']}" for e in session.conversation)
     prompt = (
         f"Read this AI discussion on '{session.topic}':\n\n{text}\n\n"
         f"Write a structured summary in this exact format:\n\n"
-        f"🟣 Claude said: [1 sentence on their main point and reasoning]\n"
-        f"🔴 DeepSeek said: [1 sentence on their main point and reasoning]\n"
-        f"🔵 Groq said: [1 sentence on their main point and reasoning]\n\n"
-        f"🏆 Winning argument: [which AI made the strongest case and why in 1 sentence]\n\n"
-        f"📌 Final conclusion: [1 sentence bottom line on the topic]\n\n"
-        f"Every section must be exactly 1 sentence. No bullet points inside sections. "
-        f"Just the format above, nothing else."
+        f"🟣 *Claude's main points:* [2-3 sentences on Claude's key arguments and reasoning]\n"
+        f"🔴 *DeepSeek's main points:* [2-3 sentences on DeepSeek's key arguments and reasoning]\n"
+        f"🔵 *Groq's main points:* [2-3 sentences on Groq's key arguments and reasoning]\n\n"
+        f"📌 *Overall conclusion:* [1-2 sentences synthesising the discussion]\n\n"
+        f"No bullet points inside sections. Just the format above, nothing else."
         f"{mode_instruction}"
     )
-    config = BOT_CONFIGS[0]  # Only use the first bot (Claude) — no fallback to others
+    # Use Claude for summary
+    config = AI_BOT_CONFIGS[0]
     resp = await call_ai(config, [{"role": "user", "content": prompt}])
     if resp:
-        return f"📋 *Summary: {session.topic}*\n\n{resp.strip()}"
+        return f"📋 *Summary of the Discussion*\n\n{resp.strip()}"
+    return None
+
+
+async def run_voting(session, bigbro_bot):
+    """Ask each AI to vote for the strongest argument (not their own). Tally & declare winner."""
+    text = "\n\n".join(f"[{e['name']}]: {e['text']}" for e in session.conversation)
+    votes = []  # [{voter, winner, reason}, ...]
+
+    for config in AI_BOT_CONFIGS:
+        bot_app = bot_apps.get(config["name"])
+        if not bot_app:
+            continue
+
+        others = [b["name"] for b in AI_BOT_CONFIGS if b["name"] != config["name"]]
+        vote_prompt = (
+            f"Read this AI discussion on '{session.topic}':\n\n{text}\n\n"
+            f"You are {config['name']}. You MUST pick ONE from {others} who made the strongest, "
+            f"most convincing argument overall.\n\n"
+            f"Respond with ONLY this format (no extra text):\n"
+            f"WINNER: [name]\n"
+            f"REASON: [1-2 sentences why their argument was best]"
+        )
+
+        stop_typing = asyncio.Event()
+        typing_task = asyncio.create_task(keep_typing(bot_app.bot, session.chat_id, stop_typing))
+
+        logger.info(f"  🗳️ {config['icon']} {config['name']} voting...")
+        response = await call_ai(config, [{"role": "user", "content": vote_prompt}])
+
+        stop_typing.set()
+        await typing_task
+
+        if response:
+            votes.append({"voter": config["name"], "response": response.strip()})
+            logger.info(f"  ✅ {config['icon']} {config['name']} voted ✓")
+        else:
+            logger.info(f"  ⚠️ {config['icon']} {config['name']} vote skipped")
+
+    # ── Tally votes ──────────────────────────────────────────────────
+    if not votes:
+        await safe_send(bigbro_bot.bot, session.chat_id, "❌ No votes could be collected.")
+        return
+
+    tally = {}
+    vote_details_lines = []
+    for v in votes:
+        voter = v["voter"]
+        resp = v["response"]
+        # Parse WINNER and REASON from response
+        winner = "Unknown"
+        reason = ""
+        for line in resp.split("\n"):
+            line = line.strip()
+            if line.upper().startswith("WINNER:"):
+                winner = line.split(":", 1)[1].strip()
+            elif line.upper().startswith("REASON:"):
+                reason = line.split(":", 1)[1].strip()
+        if winner == "Unknown":
+            # Fallback: try to find any AI name in the response
+            for ai in AI_BOT_CONFIGS:
+                if ai["name"] != voter and ai["name"].lower() in resp.lower():
+                    winner = ai["name"]
+                    break
+        tally[winner] = tally.get(winner, 0) + 1
+        vote_details_lines.append(f"🗳️ *{voter}* votes for *{winner}*\n   💬 {reason}")
+
+    total_votes = len(votes)
+    # Build tally lines with percentages
+    tally_lines = []
+    for ai in AI_BOT_CONFIGS:
+        count = tally.get(ai["name"], 0)
+        pct = (count / total_votes) * 100 if total_votes > 0 else 0
+        tally_lines.append(f"   {ai['icon']} {ai['name']}: {count}/{total_votes} ({pct:.0f}%)")
+
+    # Declare winner
+    if tally:
+        winner_name = max(tally, key=tally.get)
+        winner_icon = ""
+        for ai in AI_BOT_CONFIGS:
+            if ai["name"] == winner_name:
+                winner_icon = ai["icon"]
+                break
+        declaration = f"🏆 *Winner: {winner_icon} {winner_name}* — {tally[winner_name]}/{total_votes} votes ({tally[winner_name]/total_votes*100:.0f}%)"
+    else:
+        declaration = "🤝 It's a tie! No clear winner."
+
+    result_message = (
+        f"🗳️ *Voting Results*\n\n"
+        + "\n".join(vote_details_lines)
+        + "\n\n📊 *Tally*\n"
+        + "\n".join(tally_lines)
+        + "\n\n" + declaration
+    )
+
+    await safe_send(bigbro_bot.bot, session.chat_id, result_message)
+
+
+# =============================================================================
+# BIGBRO SUMMARY (uses Claude API with full history from Supabase)
+# =============================================================================
+
+async def generate_bigbro_summary(chat_id):
+    """Fetch full history from Supabase and generate a summary using Claude."""
+    mode_instruction = get_mode_instruction(chat_id)
+    history = await get_history(chat_id, limit=1000)
+    if not history:
+        return None
+    history_text = format_history_for_prompt(history, "")
+    prompt = (
+        f"Here is the conversation history from an AI group chat:\n\n{history_text}\n\n"
+        f"Write a concise summary covering:\n"
+        f"1. The main topics discussed\n"
+        f"2. Key points made by each participant (Claude 🟣, DeepSeek 🔴, Groq 🔵)\n"
+        f"3. Any conclusions reached\n\n"
+        f"Be thorough but concise. 3-5 paragraphs."
+        f"{mode_instruction}"
+    )
+    config = AI_BOT_CONFIGS[0]  # Use Claude
+    resp = await call_ai(config, [{"role": "user", "content": prompt}])
+    if resp:
+        return f"📋 *Full History Summary*\n\n{resp.strip()}"
     return None
 
 
@@ -655,113 +793,139 @@ async def generate_summary(session):
 # =============================================================================
 
 def build_bot(config):
+    # ── BigBro — Judge / Controller ───────────────────────────────────────
+    if config["name"] == "BigBro":
+        app = Application.builder().token(config["telegram_token"]).build()
+        bot_apps[config["name"]] = app
+
+        async def cmd_start(update, context):
+            await update.message.reply_text(
+                f"👁 *BigBro* — Discussion Judge ready!\n\n"
+                f"`/discuss <topic>` — start AI debate\n"
+                f"`/discuss rounds=N <topic>` — custom rounds (1-10)\n"
+                f"`/stop` — halt discussion\n"
+                f"`/summary` — generate summary with full history from database\n"
+                f"`/vote` — ask AIs to vote on the best argument\n\n"
+                f"I oversee the debates. The 3 AIs discuss, I judge. 🤖⚖️\n\n"
+                f"Add all 4 bots (@Claude, @DeepSeek, @Groq, @BigBro) to the group!",
+                parse_mode="Markdown",
+            )
+
+        async def cmd_discuss(update, context):
+            chat_id = update.effective_chat.id
+
+            # Don't allow two concurrent discussions in the same chat
+            existing = sessions.get(chat_id)
+            if existing and existing.active:
+                await update.message.reply_text("❌ A discussion is already running! Use `/stop` first.", parse_mode="Markdown")
+                return
+
+            args = context.args
+            if not args:
+                await update.message.reply_text("Example: `/discuss Is homeschooling better than school?`", parse_mode="Markdown")
+                return
+
+            # Parse optional  rounds=N  prefix
+            max_rounds = DEFAULT_ROUNDS
+            topic_parts = list(args)
+            if topic_parts and topic_parts[0].lower().startswith("rounds="):
+                try:
+                    max_rounds = int(topic_parts[0].split("=")[1])
+                    max_rounds = max(1, min(max_rounds, 10))
+                    topic_parts = topic_parts[1:]
+                except ValueError:
+                    pass
+
+            if not topic_parts:
+                await update.message.reply_text("❌ Please provide a topic!")
+                return
+
+            topic = " ".join(topic_parts)
+            names = " → ".join(f"{b['icon']}{b['name']}" for b in AI_BOT_CONFIGS)
+
+            session = ChatSession(chat_id, topic, max_rounds)
+            sessions[chat_id] = session
+
+            # Show current mode if not normal
+            current_mode = chat_modes.get(chat_id, "normal")
+            mode_line = ""
+            if current_mode != "normal":
+                mode_line = f"🎭 *Mode:* {current_mode}\n"
+
+            await update.message.reply_text(
+                f"👁 *Discussion Started by BigBro!*\n\n"
+                f"📌 *Topic:* {topic}\n"
+                f"👥 *Order:* {names}\n"
+                f"🔄 *{max_rounds} rounds each*\n"
+                f"{mode_line}"
+                f"\nStarting with {AI_BOT_CONFIGS[0]['icon']} {AI_BOT_CONFIGS[0]['name']}... ⏳\n\n"
+                f"Use `/stop` to cancel.",
+                parse_mode="Markdown",
+            )
+
+            # Background task so the handler returns immediately
+            session.task = asyncio.create_task(run_discussion(session))
+
+        async def cmd_stop(update, context):
+            sess = sessions.get(update.effective_chat.id)
+            if sess and sess.active:
+                sess.active = False
+                await update.message.reply_text("🛑 👁 Discussion stopped by BigBro.")
+            else:
+                await update.message.reply_text("No active discussion.")
+
+        async def cmd_summary(update, context):
+            chat_id = update.effective_chat.id
+            await update.message.reply_text("🤔 Generating summary with full history from database...")
+            summary = await generate_bigbro_summary(chat_id)
+            if summary:
+                await safe_send(app.bot, chat_id, summary)
+            else:
+                await update.message.reply_text("❌ Could not generate summary (no history or API unavailable).")
+
+        async def cmd_vote(update, context):
+            chat_id = update.effective_chat.id
+            sess = sessions.get(chat_id)
+            if not sess or not sess.conversation:
+                await update.message.reply_text("No discussion to vote on. Use `/discuss <topic>` first.", parse_mode="Markdown")
+                return
+
+            # Check if we can find BigBro bot
+            bigbro_bot = bot_apps.get("BigBro")
+            if not bigbro_bot:
+                await update.message.reply_text("❌ BigBro bot not available.")
+                return
+
+            await update.message.reply_text("🗳️ Asking each AI to vote on the best argument...")
+            await run_voting(sess, bot_apps["BigBro"])
+
+        app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("discuss", cmd_discuss))
+        app.add_handler(CommandHandler("stop", cmd_stop))
+        app.add_handler(CommandHandler("summary", cmd_summary))
+        app.add_handler(CommandHandler("vote", cmd_vote))
+        app.add_handler(CommandHandler("help", cmd_start))
+        app.add_handler(CommandHandler("commands", cmd_start))
+        app.add_handler(CommandHandler("cancel", cmd_stop))
+
+        return app
+
+    # ── Non-BigBro bots (Claude, DeepSeek, Groq) ─────────────────────────
     app = Application.builder().token(config["telegram_token"]).build()
     bot_apps[config["name"]] = app
 
     async def cmd_start(update, context):
         await update.message.reply_text(
             f"{config['icon']} *{config['name']}* ready!\n\n"
-            f"`/discuss <topic>` — debate\n"
-            f"`/discuss rounds=N <topic>` — custom rounds (1-10)\n"
             f"`/roast <idea>` — all 3 AIs brutally critique your idea\n"
             f"`/decide <dilemma>` — all 3 AIs analyze a dilemma\n"
-            f"`/stop` — halt discussion\n"
-            f"`/summary` — synthesise conclusions\n"
             f"`/mode <sarcastic|eli5|disagree|normal>` — change AI response style\n\n"
-            f"Add all 3 bots to your group!",
+            f"Use 👁 @BigBro to start discussions!",
             parse_mode="Markdown",
         )
-
-    async def cmd_stop(update, context):
-        # Only the first bot in order handles /stop
-        if config["order"] != 0:
-            return
-        sess = sessions.get(update.effective_chat.id)
-        if sess and sess.active:
-            sess.active = False
-            await update.message.reply_text(f"🛑 {config['icon']} Discussion stopped.")
-        else:
-            await update.message.reply_text("No active discussion.")
-
-    async def cmd_summary(update, context):
-        # Only the first bot in order handles /summary
-        if config["order"] != 0:
-            return
-        sess = sessions.get(update.effective_chat.id)
-        if not sess or not sess.conversation:
-            await update.message.reply_text("No discussion to summarise. Use `/discuss <topic>`", parse_mode="Markdown")
-            return
-        await update.message.reply_text("🤔 Generating summary...")
-        summary = await generate_summary(sess)
-        if summary:
-            await safe_send(
-                bot_apps[config["name"]].bot,
-                update.effective_chat.id,
-                summary,
-            )
-        else:
-            await update.message.reply_text("❌ Could not generate summary (APIs unavailable).")
-
-    async def cmd_discuss(update, context):
-        # Only the first bot in order starts a discussion
-        if config["order"] != 0:
-            return
-        chat_id = update.effective_chat.id
-
-        # Don't allow two concurrent discussions in the same chat
-        existing = sessions.get(chat_id)
-        if existing and existing.active:
-            await update.message.reply_text("❌ A discussion is already running! Use `/stop` first.", parse_mode="Markdown")
-            return
-
-        args = context.args
-        if not args:
-            await update.message.reply_text("Example: `/discuss Is homeschooling better than school?`", parse_mode="Markdown")
-            return
-
-        # Parse optional  rounds=N  prefix
-        max_rounds = DEFAULT_ROUNDS
-        topic_parts = list(args)
-        if topic_parts and topic_parts[0].lower().startswith("rounds="):
-            try:
-                max_rounds = int(topic_parts[0].split("=")[1])
-                max_rounds = max(1, min(max_rounds, 10))
-                topic_parts = topic_parts[1:]
-            except ValueError:
-                pass
-
-        if not topic_parts:
-            await update.message.reply_text("❌ Please provide a topic!")
-            return
-
-        topic = " ".join(topic_parts)
-        names = " → ".join(f"{b['icon']}{b['name']}" for b in BOT_CONFIGS)
-
-        session = ChatSession(chat_id, topic, max_rounds)
-        sessions[chat_id] = session
-
-        # Show current mode if not normal
-        current_mode = chat_modes.get(chat_id, "normal")
-        mode_line = ""
-        if current_mode != "normal":
-            mode_line = f"🎭 *Mode:* {current_mode}\n"
-
-        await update.message.reply_text(
-            f"🎯 *Discussion Started!*\n\n"
-            f"📌 *Topic:* {topic}\n"
-            f"👥 *Order:* {names}\n"
-            f"🔄 *{max_rounds} rounds each*\n"
-            f"{mode_line}"
-            f"\nStarting with {BOT_CONFIGS[0]['icon']} {BOT_CONFIGS[0]['name']}... ⏳\n\n"
-            f"Use `/stop` to cancel.",
-            parse_mode="Markdown",
-        )
-
-        # ⭐ FIX #3: Background task so the handler returns immediately
-        session.task = asyncio.create_task(run_discussion(session))
 
     async def cmd_roast(update, context):
-        # Only the first bot in order handles /roast
+        # Only the first AI bot in order handles /roast
         if config["order"] != 0:
             return
         args = context.args
@@ -771,13 +935,13 @@ def build_bot(config):
         idea = " ".join(args)
         await update.message.reply_text(
             f"🔥 *Roast incoming!* All 3 AIs will now brutally critique:\n\n"
-            f"\"{idea}\"\n\n⏳ Starting with {BOT_CONFIGS[0]['icon']} {BOT_CONFIGS[0]['name']}...",
+            f"\"{idea}\"\n\n⏳ Starting with {AI_BOT_CONFIGS[0]['icon']} {AI_BOT_CONFIGS[0]['name']}...",
             parse_mode="Markdown",
         )
         asyncio.create_task(run_roast(update.effective_chat.id, idea))
 
     async def cmd_decide(update, context):
-        # Only the first bot in order handles /decide
+        # Only the first AI bot in order handles /decide
         if config["order"] != 0:
             return
         args = context.args
@@ -787,14 +951,14 @@ def build_bot(config):
         dilemma = " ".join(args)
         await update.message.reply_text(
             f"⚖️ *Deciding...* All 3 AIs will now analyze this dilemma:\n\n"
-            f"\"{dilemma}\"\n\n⏳ Starting with {BOT_CONFIGS[0]['icon']} {BOT_CONFIGS[0]['name']}...",
+            f"\"{dilemma}\"\n\n⏳ Starting with {AI_BOT_CONFIGS[0]['icon']} {AI_BOT_CONFIGS[0]['name']}...",
             parse_mode="Markdown",
         )
         asyncio.create_task(run_decide(update.effective_chat.id, dilemma))
 
     async def cmd_mode(update, context):
         """Change the AI response mode for this chat."""
-        # Only the first bot in order handles /mode
+        # Only the first AI bot in order handles /mode
         if config["order"] != 0:
             return
 
@@ -841,7 +1005,7 @@ def build_bot(config):
         logger.info(f"  🎭 Chat {chat_id} mode set to '{mode}'")
 
     async def handle_message(update, context):
-        # Only the first bot triggers the casual reply cascade
+        # Only the first AI bot triggers the casual reply cascade
         if config["order"] != 0:
             return
 
@@ -855,15 +1019,11 @@ def build_bot(config):
         asyncio.create_task(reply_to_human(chat_id, human_text))
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("discuss", cmd_discuss))
     app.add_handler(CommandHandler("roast", cmd_roast))
     app.add_handler(CommandHandler("decide", cmd_decide))
-    app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(CommandHandler("summary", cmd_summary))
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("commands", cmd_start))
-    app.add_handler(CommandHandler("cancel", cmd_stop))
 
     # Register message handler for casual replies (non-command text messages only)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -877,21 +1037,24 @@ def build_bot(config):
 
 async def main():
     print("\n" + "=" * 60)
-    print("  🧠  MULTI-AI GROUP CHAT — v2")
+    print("  🧠  MULTI-AI GROUP CHAT — v3 with BigBro Judge")
     print("=" * 60)
     print("  • Secrets: .env (gitignored)")
     print("  • AI calls: httpx (async, non-blocking)")
-    print("  • Discussion: asyncio.create_task (non-blocking handler)")
+    print("  • BigBro controls /discuss /stop /summary /vote")
     print("  • Casual chat: any human message → all 3 AIs reply (non-blocking)")
-    print("  • Features: /stop  /summary  /discuss [rounds=N]  /roast  /decide  /mode")
+    print("  • Features: /roast  /decide  /mode")
     print()
 
     for c in BOT_CONFIGS:
         tg_ok = "✅" if c["telegram_token"] else "❌"
         api_ok = "✅" if c["api_key"] else "❌"
-        print(f"  {c['icon']} {c['name']:8s}  TG: {tg_ok}  API: {api_ok}  T={c['temperature']}")
+        if c["name"] == "BigBro":
+            print(f"  👁 BigBro   TG: {tg_ok}")
+        else:
+            print(f"  {c['icon']} {c['name']:8s}  TG: {tg_ok}  API: {api_ok}  T={c['temperature']}")
 
-    if not all(c["telegram_token"] for c in BOT_CONFIGS) or not all(c["api_key"] for c in BOT_CONFIGS):
+    if not all(c["telegram_token"] for c in BOT_CONFIGS):
         print("\n⚠️  Missing tokens/keys! Check your .env file.")
         return
 
@@ -900,32 +1063,48 @@ async def main():
     for config in BOT_CONFIGS:
         app = build_bot(config)
         await app.initialize()
-        await app.bot.set_my_commands([
-            BotCommand("start",  "Welcome"),
-            BotCommand("discuss","/discuss [rounds=N] <topic>"),
-            BotCommand("roast",  "/roast <idea> — brutal AI critique"),
-            BotCommand("decide", "/decide <dilemma> — AI analysis"),
-            BotCommand("stop",   "Stop discussion"),
-            BotCommand("summary","Summarise discussion"),
-            BotCommand("mode",   "/mode <sarcastic|eli5|disagree|normal> — change AI style"),
-        ])
+
+        # Set commands per bot type
+        if config["name"] == "BigBro":
+            await app.bot.set_my_commands([
+                BotCommand("start",   "Welcome"),
+                BotCommand("discuss", "/discuss [rounds=N] <topic> — start debate"),
+                BotCommand("stop",    "Stop discussion"),
+                BotCommand("summary", "Generate summary with full history"),
+                BotCommand("vote",    "Ask AIs to vote on best argument"),
+            ])
+        else:
+            await app.bot.set_my_commands([
+                BotCommand("start",  "Welcome"),
+                BotCommand("roast",  "/roast <idea> — brutal AI critique"),
+                BotCommand("decide", "/decide <dilemma> — AI analysis"),
+                BotCommand("mode",   "/mode <sarcastic|eli5|disagree|normal>"),
+            ])
+
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        print(f"  ✅ {config['icon']} @{config['name']} — LIVE")
+        if config["name"] == "BigBro":
+            print(f"  ✅ 👁 @BigBro — LIVE (Judge)")
+        else:
+            print(f"  ✅ {config['icon']} @{config['name']} — LIVE")
         apps.append((config, app))
 
     print()
     print("=" * 60)
     print("  ✅ ALL BOTS RUNNING!")
     print()
-    print("  🔥  /discuss <topic>             — 3 rounds each")
-    print("       /discuss rounds=5 ...        — custom rounds (1-10)")
-    print("       /roast <idea>                — brutal 3-AI critique")
-    print("       /decide <dilemma>            — 3-AI analysis")
-    print("       /stop                        — cancel")
-    print("       /summary                     — AI synthesis")
-    print("       /mode <mode>                 — change AI style")
-    print("       💬 Any message               — all 3 AIs reply casually")
+    print("  👁  BigBro commands:")
+    print("       /discuss <topic>           — start debate (3 rounds)")
+    print("       /discuss rounds=5 ...      — custom rounds (1-10)")
+    print("       /stop                      — cancel discussion")
+    print("       /summary                   — AI summary from full history")
+    print("       /vote                      — AIs vote on best argument")
+    print()
+    print("  🤖  AI bot commands (via @Claude, @DeepSeek, @Groq):")
+    print("       /roast <idea>              — brutal 3-AI critique")
+    print("       /decide <dilemma>          — 3-AI analysis")
+    print("       /mode <mode>               — change AI style")
+    print("       💬 Any message             — all 3 AIs reply casually")
     print("=" * 60)
 
     try:
