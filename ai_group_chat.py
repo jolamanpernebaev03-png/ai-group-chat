@@ -355,7 +355,7 @@ async def safe_reply_markdown(update, text, **kwargs):
 async def reply_to_human(chat_id, human_message):
     """All 3 AIs reply casually to a human message SIMULTANEOUSLY via asyncio.gather()."""
     mode_instruction = get_mode_instruction(chat_id)
-    history = await get_history(chat_id, limit=100)
+    history = await get_history(chat_id, limit=1000)
     history_text = format_history_for_prompt(history, "")
 
     async def call_and_send(config):
