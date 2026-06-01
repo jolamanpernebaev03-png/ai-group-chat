@@ -372,6 +372,51 @@ async def safe_send_markdown(bot, chat_id, text, **kwargs):
         await bot.send_message(chat_id=chat_id, text=text, **kwargs)
 
 
+def is_directly_addressed(text, bot_name):
+    """Check if a bot is directly addressed (not just mentioned in passing).
+    Returns True if the name appears at the start of the message, or follows
+    greeting/request patterns like 'hey [name]', 'hi [name]', 'ask [name]',
+    '[name] what do you think', '[name] can you'."""
+    text_lower = text.lower()
+    name_lower = bot_name.lower()
+    emoji = ""
+    if bot_name == "BigBro":
+        emoji = "👁"
+    elif bot_name == "Claude":
+        emoji = "🟣"
+    elif bot_name == "DeepSeek":
+        emoji = "🔴"
+    elif bot_name == "Groq":
+        emoji = "🔵"
+
+    # Direct opening: message starts with the name
+    if text_lower.startswith(name_lower) or (emoji and text.startswith(emoji)):
+        return True
+
+    # Greeting + name patterns
+    greeting_patterns = [f"hey {name_lower}", f"hi {name_lower}", f"hello {name_lower}"]
+    for pattern in greeting_patterns:
+        if pattern in text_lower:
+            return True
+
+    # Request patterns
+    request_patterns = [f"{name_lower} what", f"{name_lower} can", f"ask {name_lower}", f"{name_lower}, what", f"{name_lower} do you"]
+    for pattern in request_patterns:
+        if pattern in text_lower:
+            return True
+
+    # Question directed at bot: "bigbro, ..." or "bigbro ..."
+    short_variants = []
+    if bot_name == "BigBro":
+        short_variants = ["big bro"]
+    if any(f"{v}," in text_lower or f"{v} " in text_lower.split()[0:2] for v in [name_lower] + short_variants if v):
+        first_words = text_lower.split()[:3]
+        if any(v in first_words for v in [name_lower] + short_variants if v):
+            return True
+
+    return False
+
+
 async def safe_reply_markdown(update, text, **kwargs):
     """Reply to a message with Markdown parsing; fall back to plain text on error."""
     try:
@@ -863,22 +908,18 @@ def build_bot(config):
                 active_conversation.pop(chat_id, None)
                 target_bot = None
             else:
-                # Check for specific bot mention
+                # Check which bot is directly addressed (not just mentioned in passing)
                 target_bot = None
-                if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
-                    target_bot = "BigBro"
-                elif "claude" in text_lower or "🟣" in human_text:
-                    target_bot = "Claude"
-                elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
-                    target_bot = "DeepSeek"
-                elif "groq" in text_lower or "🔵" in human_text:
-                    target_bot = "Groq"
+                for bot_name in ["BigBro", "Claude", "DeepSeek", "Groq"]:
+                    if is_directly_addressed(human_text, bot_name):
+                        target_bot = bot_name
+                        break
 
                 if target_bot:
-                    # Specific bot mentioned — start/switch conversation with that bot
+                    # Directly addressed — start/switch conversation with that bot
                     active_conversation[chat_id] = target_bot
                 elif chat_id in active_conversation:
-                    # No bot mentioned but in an active conversation — continue with same bot
+                    # No bot addressed but in an active conversation — continue with same bot
                     target_bot = active_conversation[chat_id]
                 else:
                     # New topic with no context — all bots reply
@@ -980,19 +1021,15 @@ def build_bot(config):
             active_conversation.pop(chat_id, None)
             target_bot = None
         else:
-            # Check for specific bot mention
+            # Check which bot is directly addressed (not just mentioned in passing)
             target_bot = None
-            if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
-                target_bot = "BigBro"
-            elif "claude" in text_lower or "🟣" in human_text:
-                target_bot = "Claude"
-            elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
-                target_bot = "DeepSeek"
-            elif "groq" in text_lower or "🔵" in human_text:
-                target_bot = "Groq"
+            for bot_name in ["BigBro", "Claude", "DeepSeek", "Groq"]:
+                if is_directly_addressed(human_text, bot_name):
+                    target_bot = bot_name
+                    break
 
             if target_bot:
-                # Specific bot mentioned — start/switch conversation with that bot
+                # Directly addressed — start/switch conversation with that bot
                 active_conversation[chat_id] = target_bot
             elif chat_id in active_conversation:
                 # No bot mentioned but in an active conversation — continue with same bot
