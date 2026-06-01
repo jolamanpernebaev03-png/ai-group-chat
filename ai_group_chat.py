@@ -381,13 +381,16 @@ async def safe_reply_markdown(update, text, **kwargs):
 # =============================================================================
 
 
-async def reply_to_human(chat_id, human_message):
-    """All 3 AI bots + BigBro reply casually to a human message SIMULTANEOUSLY via asyncio.gather()."""
+async def reply_to_human(chat_id, human_message, target_bot=None):
+    """All 3 AI bots + BigBro reply casually to a human message SIMULTANEOUSLY via asyncio.gather().
+    If target_bot is set, only that bot replies."""
     mode_instruction = get_mode_instruction(chat_id)
     history = await get_history(chat_id, limit=1000)
     history_text = format_history_for_prompt(history, "")
 
     async def call_and_send_ai(config):
+        if target_bot and config['name'].lower() != target_bot.lower():
+            return
         bot_app = bot_apps.get(config["name"])
         if not bot_app:
             return
@@ -431,6 +434,8 @@ async def reply_to_human(chat_id, human_message):
 
     async def call_and_send_bigbro():
         """BigBro replies using Claude API separately."""
+        if target_bot and target_bot.lower() != "bigbro":
+            return
         bot_app = bot_apps.get("BigBro")
         if not bot_app:
             return
@@ -837,7 +842,20 @@ def build_bot(config):
             human_text = update.message.text
             sender_name = update.message.from_user.first_name or "Human"
             await save_message(chat_id, sender_name, human_text, is_bot=False)
-            asyncio.create_task(reply_to_human(chat_id, human_text))
+
+            # Detect which bot is mentioned (if any)
+            text_lower = human_text.lower()
+            target_bot = None
+            if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
+                target_bot = "BigBro"
+            elif "claude" in text_lower or "🟣" in human_text:
+                target_bot = "Claude"
+            elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
+                target_bot = "DeepSeek"
+            elif "groq" in text_lower or "🔵" in human_text:
+                target_bot = "Groq"
+
+            asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
 
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("discuss", cmd_discuss))
@@ -921,8 +939,20 @@ def build_bot(config):
         sender_name = update.message.from_user.first_name or "Human"
         await save_message(chat_id, sender_name, human_text, is_bot=False)
 
+        # Detect which bot is mentioned (if any)
+        text_lower = human_text.lower()
+        target_bot = None
+        if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
+            target_bot = "BigBro"
+        elif "claude" in text_lower or "🟣" in human_text:
+            target_bot = "Claude"
+        elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
+            target_bot = "DeepSeek"
+        elif "groq" in text_lower or "🔵" in human_text:
+            target_bot = "Groq"
+
         # Launch background task so the handler returns immediately
-        asyncio.create_task(reply_to_human(chat_id, human_text))
+        asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
 
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("start", cmd_mode))
