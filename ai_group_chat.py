@@ -27,7 +27,7 @@ import time
 
 import httpx
 from dotenv import load_dotenv
-from memory import save_message, get_history, format_history_for_prompt
+from memory import save_message, get_history, format_history_for_prompt, SUPABASE_URL, HEADERS as SUPABASE_HEADERS
 from telegram import Update, BotCommand
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -757,6 +757,10 @@ async def run_voting(session, bigbro_bot):
 
     await safe_send(bigbro_bot.bot, session.chat_id, result_message)
 
+    # Update leaderboard
+    if tally:
+        await update_leaderboard(winner_name, ["Claude", "DeepSeek", "Groq"])
+
 
 # =============================================================================
 # BIGBRO SUMMARY (uses Claude API with full history from Supabase)
@@ -922,6 +926,20 @@ def build_bot(config):
             await update.message.reply_text("🗳️ Asking each AI to vote on the best argument...")
             await run_voting(sess, bot_apps["BigBro"])
 
+        async def cmd_leaderboard(update, context):
+            data = await get_leaderboard()
+            if not data:
+                await update.message.reply_text("No debates yet! Use /discuss to start.")
+                return
+            sorted_bots = sorted(data.items(), key=lambda x: x[1]["wins"], reverse=True)
+            medals = ["🥇", "🥈", "🥉"]
+            msg = "🏆 *ALL TIME DEBATE LEADERBOARD*\n\n"
+            for i, (bot, stats) in enumerate(sorted_bots):
+                medal = medals[i] if i < 3 else "▪️"
+                pct = round(stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
+                msg += f"{medal} {bot} — {stats['wins']} wins / {stats['total']} debates ({pct}%)\n"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+
         # BigBro also handles casual messages
         async def handle_message(update, context):
             msg_id = update.message.message_id
@@ -965,12 +983,40 @@ def build_bot(config):
 
             asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
 
+        async def cmd_challenge(update, context):
+            import random
+            chat_id = update.effective_chat.id
+            bots = [c for c in BOT_CONFIGS if c["name"] != "BigBro"]
+            chosen = random.sample(bots, 2)
+            topics = [
+                ("AI will make humans obsolete", "AI will always need humans"),
+                ("Money buys happiness", "Money cannot buy happiness"),
+                ("Free will exists", "Free will is an illusion"),
+                ("Social media does more harm than good", "Social media does more good than harm"),
+                ("Failure is necessary for success", "Success can be achieved without failure"),
+            ]
+            topic_pair = random.choice(topics)
+            a, b = chosen
+            msg = (f"⚔️ *CHALLENGE ROUND!*\n\n"
+                   f"{a['icon']} {a['name']} must argue: *{topic_pair[0]}*\n"
+                   f"{b['icon']} {b['name']} must argue: *{topic_pair[1]}*\n\n"
+                   f"Starting in 3 seconds...")
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            await asyncio.sleep(3)
+            topic = f"{topic_pair[0]} vs {topic_pair[1]}"
+            session = ChatSession(chat_id, topic, 2)
+            session.forced_order = [a, b]
+            sessions[chat_id] = session
+            session.task = asyncio.create_task(run_discussion(session))
+
         app.add_handler(CommandHandler("start", cmd_start))
         app.add_handler(CommandHandler("discuss", cmd_discuss))
         app.add_handler(CommandHandler("topics", cmd_topics))
         app.add_handler(CommandHandler("stop", cmd_stop))
         app.add_handler(CommandHandler("summary", cmd_summary))
         app.add_handler(CommandHandler("vote", cmd_vote))
+        app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
+        app.add_handler(CommandHandler("challenge", cmd_challenge))
         app.add_handler(CommandHandler("help", cmd_start))
         app.add_handler(CommandHandler("commands", cmd_start))
         app.add_handler(CommandHandler("cancel", cmd_stop))
@@ -1087,6 +1133,37 @@ def build_bot(config):
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     return app
+
+
+# =============================================================================
+# LEADERBOARD
+# =============================================================================
+
+async def update_leaderboard(winner_name, all_participants):
+    for bot in all_participants:
+        wins = 1 if bot == winner_name else 0
+        await save_message(0, f"LEADERBOARD_UPDATE:{bot}:{wins}", "", is_bot=True)
+
+async def get_leaderboard():
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/messages",
+            headers={**SUPABASE_HEADERS, "Prefer": ""},
+            params={"sender": "like.LEADERBOARD_UPDATE:*", "order": "created_at.asc"}
+        )
+    if resp.status_code != 200:
+        return {}
+    records = {}
+    for msg in resp.json():
+        parts = msg["sender"].split(":")
+        if len(parts) == 3:
+            bot = parts[1]
+            wins = int(parts[2])
+            if bot not in records:
+                records[bot] = {"wins": 0, "total": 0}
+            records[bot]["wins"] += wins
+            records[bot]["total"] += 1
+    return records
 
 
 # =============================================================================
