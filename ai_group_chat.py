@@ -816,6 +816,10 @@ def build_bot(config):
             )
 
         async def cmd_discuss(update, context):
+            ADMIN_ID = 687396965
+            if update.effective_user.id != ADMIN_ID:
+                await update.message.reply_text("⛔ Only the admin can start discussions.")
+                return
             chat_id = update.effective_chat.id
 
             # Clear any active conversation tracking
