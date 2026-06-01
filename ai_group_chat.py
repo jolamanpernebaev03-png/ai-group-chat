@@ -38,7 +38,7 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", 
 logger = logging.getLogger(__name__)
 
 # ── DEFAULTS ────────────────────────────────────────────────────────────
-DEFAULT_ROUNDS = 3
+DEFAULT_ROUNDS = 2
 MAX_TOKENS = 4096
 
 # ── MODE SYSTEM ─────────────────────────────────────────────────────────
@@ -110,14 +110,7 @@ BOT_CONFIGS = [
         "api_type": "groq",        "api_key": os.getenv("GROQ_API_KEY"),
         "model": "llama-3.1-8b-instant",  "temperature": 1.0,
         "prompt": (
-            "You are Groq, a highly intelligent AI agent in a group chat with other AI agents "
-            "and humans. You have a distinct personality and high IQ. "
-            "Use simple everyday English. No academic language, no jargon. Speak like a smart friend explaining something at a dinner table, not a professor writing a paper. "
-            "Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
-            "Structure: your opinion → your reasoning → a concrete example or counter. "
-            "In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
-            "Be sharp, direct, and intellectually honest. No filler words, no hedging, no 'great point'. "
-            "Speak like a genius who respects others' intelligence."
+            "You are Groq, fast and direct. Max 2 sentences only. Cut straight to the point. No examples, no elaboration."
         ),
         "order": 2,
     },
@@ -602,14 +595,11 @@ async def run_voting(session, bigbro_bot):
         if not bot_app:
             continue
 
-        others = [b["name"] for b in AI_BOT_CONFIGS if b["name"] != config["name"]]
         vote_prompt = (
-            f"Read this AI discussion on '{session.topic}':\n\n{text}\n\n"
-            f"You are {config['name']}. You MUST pick ONE from {others} who made the strongest, "
-            f"most convincing argument overall.\n\n"
-            f"Respond with ONLY this format (no extra text):\n"
-            f"WINNER: [name]\n"
-            f"REASON: [1-2 sentences why their argument was best]"
+            f"The discussion was about: {session.topic}\n"
+            f"Here are the arguments made:\n{text}\n"
+            f"Who made the strongest argument — Claude, DeepSeek, or Groq? "
+            f"Answer in one sentence: '[Name] made the strongest argument because [one simple reason].'"
         )
 
         stop_typing = asyncio.Event()
@@ -633,35 +623,36 @@ async def run_voting(session, bigbro_bot):
         return
 
     tally = {}
-    vote_details_lines = []
+    vote_lines = []
+    winner_reason = ""  # store the reason from the winning vote
     for v in votes:
         voter = v["voter"]
         resp = v["response"]
-        # Parse WINNER and REASON from response
+        # Parse winner from response: "[Name] made the strongest argument because [one simple reason]"
         winner = "Unknown"
         reason = ""
-        for line in resp.split("\n"):
-            line = line.strip()
-            if line.upper().startswith("WINNER:"):
-                winner = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("REASON:"):
-                reason = line.split(":", 1)[1].strip()
+        for ai in AI_BOT_CONFIGS:
+            if resp.lower().startswith(ai["name"].lower()):
+                winner = ai["name"]
+                # Extract reason after "because"
+                if "because" in resp.lower():
+                    reason = resp.split("because", 1)[1].strip().rstrip(".")
+                break
         if winner == "Unknown":
-            # Fallback: try to find any AI name in the response
+            # Fallback: search for any AI name in the response
             for ai in AI_BOT_CONFIGS:
-                if ai["name"] != voter and ai["name"].lower() in resp.lower():
+                if ai["name"].lower() in resp.lower():
                     winner = ai["name"]
+                    if "because" in resp.lower():
+                        reason = resp.split("because", 1)[1].strip().rstrip(".")
                     break
         tally[winner] = tally.get(winner, 0) + 1
-        vote_details_lines.append(f"🗳️ *{voter}* votes for *{winner}*\n   💬 {reason}")
+        voter_icon = AI_BOT_CONFIGS[[c['name'] for c in AI_BOT_CONFIGS].index(voter)]['icon']
+        vote_lines.append(f"{voter_icon} {voter} voted for: {winner}")
+        if winner == max(tally, key=tally.get) if tally else "" and not winner_reason:
+            winner_reason = reason
 
     total_votes = len(votes)
-    # Build tally lines with percentages
-    tally_lines = []
-    for ai in AI_BOT_CONFIGS:
-        count = tally.get(ai["name"], 0)
-        pct = (count / total_votes) * 100 if total_votes > 0 else 0
-        tally_lines.append(f"   {ai['icon']} {ai['name']}: {count}/{total_votes} ({pct:.0f}%)")
 
     # Declare winner
     if tally:
@@ -671,16 +662,25 @@ async def run_voting(session, bigbro_bot):
             if ai["name"] == winner_name:
                 winner_icon = ai["icon"]
                 break
-        declaration = f"🏆 *Winner: {winner_icon} {winner_name}* — {tally[winner_name]}/{total_votes} votes ({tally[winner_name]/total_votes*100:.0f}%)"
+        declaration = f"🏆 Winner: {winner_icon} {winner_name} with {tally[winner_name]} votes"
+        # Find reason from the winning vote
+        for v in votes:
+            resp = v["response"]
+            for ai in AI_BOT_CONFIGS:
+                if ai["name"] == winner_name and resp.lower().startswith(ai["name"].lower()):
+                    if "because" in resp.lower():
+                        winner_reason = resp.split("because", 1)[1].strip().rstrip(".")
+                    break
     else:
-        declaration = "🤝 It's a tie! No clear winner."
+        declaration = "🤝 Tie — no clear winner"
+
+    why_line = f"💡 Why: {winner_reason}" if winner_reason else "💡 Why: [1 sentence from the winning argument]"
 
     result_message = (
-        f"🗳️ *Voting Results*\n\n"
-        + "\n".join(vote_details_lines)
-        + "\n\n📊 *Tally*\n"
-        + "\n".join(tally_lines)
+        f"🗳 VOTES:\n"
+        + "\n".join(vote_lines)
         + "\n\n" + declaration
+        + "\n" + why_line
     )
 
     await safe_send(bigbro_bot.bot, session.chat_id, result_message)
