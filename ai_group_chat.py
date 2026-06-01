@@ -311,6 +311,7 @@ sessions = {}        # chat_id -> ChatSession
 chat_modes = {}      # chat_id -> mode string (e.g. "sarcastic", "eli5")
 bot_apps = {}        # name -> Application
 processed_messages = set()  # deduplicate handling of same message_id
+active_conversation = {}  # chat_id -> bot name currently in conversation
 
 
 # =============================================================================
@@ -751,6 +752,9 @@ def build_bot(config):
         async def cmd_discuss(update, context):
             chat_id = update.effective_chat.id
 
+            # Clear any active conversation tracking
+            active_conversation.pop(chat_id, None)
+
             # Don't allow two concurrent discussions in the same chat
             existing = sessions.get(chat_id)
             if existing and existing.active:
@@ -847,17 +851,38 @@ def build_bot(config):
             sender_name = update.message.from_user.first_name or "Human"
             await save_message(chat_id, sender_name, human_text, is_bot=False)
 
-            # Detect which bot is mentioned (if any)
+            # Context-aware targeting logic
             text_lower = human_text.lower()
-            target_bot = None
-            if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
-                target_bot = "BigBro"
-            elif "claude" in text_lower or "🟣" in human_text:
-                target_bot = "Claude"
-            elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
-                target_bot = "DeepSeek"
-            elif "groq" in text_lower or "🔵" in human_text:
-                target_bot = "Groq"
+
+            # Group-addressed keywords — all bots reply, clear conversation
+            group_keywords = ["everyone", " all ", "guys", "y'all", "yall", "what do you all think",
+                              "what does everyone", "to the group", "anyone"]
+            addressed_to_group = any(kw in text_lower for kw in group_keywords)
+
+            if addressed_to_group:
+                active_conversation.pop(chat_id, None)
+                target_bot = None
+            else:
+                # Check for specific bot mention
+                target_bot = None
+                if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
+                    target_bot = "BigBro"
+                elif "claude" in text_lower or "🟣" in human_text:
+                    target_bot = "Claude"
+                elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
+                    target_bot = "DeepSeek"
+                elif "groq" in text_lower or "🔵" in human_text:
+                    target_bot = "Groq"
+
+                if target_bot:
+                    # Specific bot mentioned — start/switch conversation with that bot
+                    active_conversation[chat_id] = target_bot
+                elif chat_id in active_conversation:
+                    # No bot mentioned but in an active conversation — continue with same bot
+                    target_bot = active_conversation[chat_id]
+                else:
+                    # New topic with no context — all bots reply
+                    pass
 
             asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
 
@@ -943,17 +968,38 @@ def build_bot(config):
         sender_name = update.message.from_user.first_name or "Human"
         await save_message(chat_id, sender_name, human_text, is_bot=False)
 
-        # Detect which bot is mentioned (if any)
+        # Context-aware targeting logic
         text_lower = human_text.lower()
-        target_bot = None
-        if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
-            target_bot = "BigBro"
-        elif "claude" in text_lower or "🟣" in human_text:
-            target_bot = "Claude"
-        elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
-            target_bot = "DeepSeek"
-        elif "groq" in text_lower or "🔵" in human_text:
-            target_bot = "Groq"
+
+        # Group-addressed keywords — all bots reply, clear conversation
+        group_keywords = ["everyone", " all ", "guys", "y'all", "yall", "what do you all think",
+                          "what does everyone", "to the group", "anyone"]
+        addressed_to_group = any(kw in text_lower for kw in group_keywords)
+
+        if addressed_to_group:
+            active_conversation.pop(chat_id, None)
+            target_bot = None
+        else:
+            # Check for specific bot mention
+            target_bot = None
+            if "bigbro" in text_lower or "big bro" in text_lower or "👁" in human_text:
+                target_bot = "BigBro"
+            elif "claude" in text_lower or "🟣" in human_text:
+                target_bot = "Claude"
+            elif "deepseek" in text_lower or "deep seek" in text_lower or "🔴" in human_text:
+                target_bot = "DeepSeek"
+            elif "groq" in text_lower or "🔵" in human_text:
+                target_bot = "Groq"
+
+            if target_bot:
+                # Specific bot mentioned — start/switch conversation with that bot
+                active_conversation[chat_id] = target_bot
+            elif chat_id in active_conversation:
+                # No bot mentioned but in an active conversation — continue with same bot
+                target_bot = active_conversation[chat_id]
+            else:
+                # New topic with no context — all bots reply
+                pass
 
         # Launch background task so the handler returns immediately
         asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
