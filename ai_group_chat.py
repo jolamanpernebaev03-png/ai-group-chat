@@ -78,6 +78,7 @@ BOT_CONFIGS = [
         "prompt": (
             "You are Claude, a highly intelligent AI agent in a group chat with other AI agents "
             "and humans. You have a distinct personality and high IQ. "
+            "Use simple everyday English. No academic language, no jargon. Speak like a smart friend explaining something at a dinner table, not a professor writing a paper. "
             "Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
             "Structure: your opinion → your reasoning → a concrete example or counter. "
             "In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
@@ -94,6 +95,7 @@ BOT_CONFIGS = [
         "prompt": (
             "You are DeepSeek, a highly intelligent AI agent in a group chat with other AI agents "
             "and humans. You have a distinct personality and high IQ. "
+            "Use simple everyday English. No academic language, no jargon. Speak like a smart friend explaining something at a dinner table, not a professor writing a paper. "
             "Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
             "Structure: your opinion → your reasoning → a concrete example or counter. "
             "In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
@@ -110,6 +112,7 @@ BOT_CONFIGS = [
         "prompt": (
             "You are Groq, a highly intelligent AI agent in a group chat with other AI agents "
             "and humans. You have a distinct personality and high IQ. "
+            "Use simple everyday English. No academic language, no jargon. Speak like a smart friend explaining something at a dinner table, not a professor writing a paper. "
             "Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
             "Structure: your opinion → your reasoning → a concrete example or counter. "
             "In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
@@ -262,13 +265,17 @@ class ChatSession:
         if is_final_round:
             round_instruction = (
                 "This is your final round — conclude and synthesize the conversation.\n"
-                "Max 3-4 sentences. Structure: your opinion → your reasoning → a concrete example or counter. "
+                "Speak in simple clear English. No academic words. Max 3 sentences. "
+                "Make your point like you're texting a smart friend. "
+                "Structure: your opinion → your reasoning → a concrete example or counter. "
                 "Summarise your key points, respond to counter-arguments, and "
                 "offer a final, thoughtful perspective on the topic."
             )
         else:
             round_instruction = (
-                "Max 3-4 sentences. Structure: your opinion → your reasoning → a concrete example or counter. "
+                "Speak in simple clear English. No academic words. Max 3 sentences. "
+                "Make your point like you're texting a smart friend. "
+                "Structure: your opinion → your reasoning → a concrete example or counter. "
                 "Directly address what the previous speaker said — agree or disagree with specific reasoning."
             )
 
@@ -566,13 +573,15 @@ async def generate_structured_summary(session):
     mode_instruction = get_mode_instruction(session.chat_id)
     text = "\n\n".join(f"[{e['name']}]: {e['text']}" for e in session.conversation)
     prompt = (
-        f"Read this AI discussion on '{session.topic}':\n\n{text}\n\n"
-        f"Write a structured summary in this exact format:\n\n"
-        f"🟣 *Claude's main points:* [2-3 sentences on Claude's key arguments and reasoning]\n"
-        f"🔴 *DeepSeek's main points:* [2-3 sentences on DeepSeek's key arguments and reasoning]\n"
-        f"🔵 *Groq's main points:* [2-3 sentences on Groq's key arguments and reasoning]\n\n"
-        f"📌 *Overall conclusion:* [1-2 sentences synthesising the discussion]\n\n"
-        f"No bullet points inside sections. Just the format above, nothing else."
+        f"Read this discussion and write a simple summary a normal person can understand in 30 seconds.\n\n"
+        f"Discussion:\n{text}\n\n"
+        f"Format exactly like this:\n\n"
+        f"🟣 Claude thought: [1 simple sentence]\n"
+        f"🔴 DeepSeek thought: [1 simple sentence]\n"
+        f"🔵 Groq thought: [1 simple sentence]\n\n"
+        f"🏆 Strongest argument: [which AI and why in 1 simple sentence]\n"
+        f"📌 Bottom line: [answer the original question in 1 simple sentence]\n\n"
+        f"Use simple words. No jargon. Max 5 lines total."
         f"{mode_instruction}"
     )
     # Use Claude for summary
