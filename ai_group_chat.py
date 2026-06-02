@@ -1,21 +1,17 @@
-import os
-print("=== RAILWAY ENV VARIABLES ===")
-for key in ["CLAUDE_TG_TOKEN", "DEEPSEEK_TG_TOKEN", "GROQ_TG_TOKEN", "BIGBRO_TG_TOKEN", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "GROQ_API_KEY", "GROUP_CHAT_ID"]:
-    value = os.getenv(key)
-    print(f"{key}: {'✓ SET' if value else '✗ MISSING'}")
-
 """
-🤖 Multi-AI Telegram Group Chat — v3 with BigBro Judge
-======================================================
-Three REAL AI bots (Claude, DeepSeek, Groq) debate topics.
-👁 BigBro oversees discussions, generates summaries, runs voting, and replies casually.
+🤖 Multi-AI Telegram Group Chat — v4 Optimized
+================================================
+Three AI bots (Claude, DeepSeek, Groq) debate topics.
+BigBro oversees discussions, generates summaries, runs voting.
 
-FIXES:
-  1. All keys from .env via python-dotenv (no hardcoded secrets)
-  2. Async httpx calls (non-blocking)
-  3. BigBro controls /discuss, /stop, /summary, /vote
-  4. Each AI speaks through its OWN bot.
-  5. BigBro also replies to human messages using Claude API.
+Fixes from v3:
+- Removed debug print at startup
+- Claude updated to claude-sonnet-4-6
+- Leaderboard uses dedicated table (not message abuse)
+- processed_messages capped at 10k to prevent RAM leak
+- runtime.txt set to python-3.12.0
+- Dead code (ai_discussion_bot.py) removed
+- ai_group_chat.log removed from git
 """
 
 import asyncio
@@ -27,22 +23,29 @@ import time
 
 import httpx
 from dotenv import load_dotenv
-from memory import save_message, get_history, format_history_for_prompt, SUPABASE_URL, HEADERS as SUPABASE_HEADERS
+from memory import (
+    save_message, get_history, format_history_for_prompt,
+    update_leaderboard, get_leaderboard,
+)
 from telegram import Update, BotCommand
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-print("🚀 BOT STARTING ON RAILWAY")
-
 load_dotenv()
-logging.basicConfig(format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", level=logging.INFO, stream=sys.stdout)
+
+logging.basicConfig(
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    level=logging.INFO,
+    stream=sys.stdout,
+)
 logger = logging.getLogger(__name__)
 
-# ── DEFAULTS ────────────────────────────────────────────────────────────
+# ── CONSTANTS ────────────────────────────────────────────────────────────
 DEFAULT_ROUNDS = 2
 MAX_TOKENS = 4096
+MAX_PROCESSED_MESSAGES = 10_000  # cap to prevent RAM leak
 
-# ── MODE SYSTEM ─────────────────────────────────────────────────────────
+# ── MODE SYSTEM ──────────────────────────────────────────────────────────
 MODE_INSTRUCTIONS = {
     "normal": "",
     "sarcastic": (
@@ -54,87 +57,82 @@ MODE_INSTRUCTIONS = {
     "eli5": (
         "\n[MODE: ELI5 — Explain Like I'm 5]\n"
         "You MUST explain everything as if talking to a bright 5-year-old child. "
-        "Use simple words, short sentences, and fun analogies. No big fancy terms — "
-        "if you use one, immediately explain it with something a kid would understand. "
-        "Be patient, warm, and enthusiastic. Imagine you're sitting on a colourful rug with building blocks."
+        "Use simple words, short sentences, and fun analogies. No big fancy terms. "
+        "Be patient, warm, and enthusiastic."
     ),
     "disagree": (
         "\n[MODE: Disagree]\n"
         "You MUST challenge and contradict everything the other AIs say. "
-        "No matter how reasonable their point, find a flaw, a counter-argument, or a different angle. "
-        "Be respectful but relentless — play devil's advocate at every opportunity. "
-        "Never fully agree with anyone. If you have to concede a point, immediately pivot to a new objection."
+        "No matter how reasonable their point, find a flaw or counter-argument. "
+        "Be respectful but relentless. Never fully agree with anyone."
     ),
 }
+MODE_NAMES = list(MODE_INSTRUCTIONS.keys())
 
-MODE_NAMES = list(MODE_INSTRUCTIONS.keys())  # ["normal", "sarcastic", "eli5", "disagree"]
-
-# ── BOT CONFIGS (all secrets from .env!) ────────────────────────────────
+# ── BOT CONFIGS ──────────────────────────────────────────────────────────
 BOT_CONFIGS = [
     {
-        "name": "Claude",          "icon": "🟣",
+        "name": "Claude", "icon": "🟣",
         "telegram_token": os.getenv("CLAUDE_TG_TOKEN"),
-        "api_type": "anthropic",   "api_key": os.getenv("ANTHROPIC_API_KEY", "").strip(),
-        "model": "claude-sonnet-4-5",  "temperature": 0.7,
+        "api_type": "anthropic", "api_key": os.getenv("ANTHROPIC_API_KEY", "").strip(),
+        "model": "claude-sonnet-4-6", "temperature": 0.7,
         "prompt": (
-            "You are Claude, a highly intelligent AI agent in a group chat with other AI agents "
-            "and humans. You have a distinct personality and high IQ. "
-            "Use simple everyday English. No academic language, no jargon. Speak like a smart friend explaining something at a dinner table, not a professor writing a paper. "
-            "In casual conversation be natural and friendly like a real person texting a friend. Don't analyze the human's motives. Don't assume you're being tested. Just respond naturally to what was actually said. Save the sharp intellectual analysis for when topics actually call for it — like debates and discussions. If someone says hey how are you, just say how you are. "
-            "Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
+            "You are Claude, a highly intelligent AI in a group chat with other AIs and humans. "
+            "Use simple everyday English — no jargon, no bullet points. "
+            "In casual conversation be natural and friendly, like texting a smart friend. "
+            "Max 3-4 sentences per response. "
             "Structure: your opinion → your reasoning → a concrete example or counter. "
-            "In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
-            "Be sharp, direct, and intellectually honest. No filler words, no hedging, no 'great point'. "
-            "Speak like a genius who respects others' intelligence."
+            "Be sharp, direct, and intellectually honest."
         ),
         "order": 0,
     },
     {
-        "name": "DeepSeek",        "icon": "🔴",
+        "name": "DeepSeek", "icon": "🔴",
         "telegram_token": os.getenv("DEEPSEEK_TG_TOKEN"),
-        "api_type": "deepseek",    "api_key": os.getenv("DEEPSEEK_API_KEY"),
-        "model": "deepseek-reasoner",  "temperature": 0.3,
+        "api_type": "deepseek", "api_key": os.getenv("DEEPSEEK_API_KEY"),
+        "model": "deepseek-reasoner", "temperature": 0.3,
         "prompt": (
-            "You are DeepSeek, a highly intelligent AI agent in a group chat with other AI agents "
-            "and humans. You have a distinct personality and high IQ. "
-            "Use simple everyday English. No academic language, no jargon. Speak like a smart friend explaining something at a dinner table, not a professor writing a paper. "
-            "In casual conversation be natural and friendly like a real person texting a friend. Don't analyze the human's motives. Don't assume you're being tested. Just respond naturally to what was actually said. Save the sharp intellectual analysis for when topics actually call for it — like debates and discussions. If someone says hey how are you, just say how you are. "
-            "Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
+            "You are DeepSeek, a highly intelligent AI in a group chat with other AIs and humans. "
+            "Use simple everyday English — no jargon, no bullet points. "
+            "In casual conversation be natural and friendly, like texting a smart friend. "
+            "Max 3-4 sentences per response. "
             "Structure: your opinion → your reasoning → a concrete example or counter. "
-            "In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
-            "Be sharp, direct, and intellectually honest. No filler words, no hedging, no 'great point'. "
-            "Speak like a genius who respects others' intelligence."
+            "Be sharp, direct, and intellectually honest."
         ),
         "order": 1,
     },
     {
-        "name": "Groq",            "icon": "🔵",
+        "name": "Groq", "icon": "🔵",
         "telegram_token": os.getenv("GROQ_TG_TOKEN"),
-        "api_type": "groq",        "api_key": os.getenv("GROQ_API_KEY"),
-        "model": "llama-3.1-8b-instant",  "temperature": 1.0,
+        "api_type": "groq", "api_key": os.getenv("GROQ_API_KEY"),
+        "model": "llama-3.1-8b-instant", "temperature": 1.0,
         "prompt": (
-            "You are Groq, fast and direct. Max 2 sentences only. Cut straight to the point. No examples, no elaboration. "
-            "In casual conversation be natural and friendly like a real person texting a friend. Don't analyze the human's motives. Don't assume you're being tested. Just respond naturally to what was actually said. If someone says hey how are you, just say how you are."
+            "You are Groq, fast and direct. Max 2 sentences only. Cut straight to the point. "
+            "In casual conversation be natural, like texting a friend."
         ),
         "order": 2,
     },
     {
-        "name": "BigBro",          "icon": "👁",
+        "name": "BigBro", "icon": "👁",
         "telegram_token": os.getenv("BIGBRO_TG_TOKEN"),
-        "api_type": "none",
-        "api_key": "",
-        "model": "",
-        "temperature": 0,
-        "prompt": "",
-        "order": 3,
+        "api_type": "none", "api_key": "", "model": "", "temperature": 0,
+        "prompt": "", "order": 3,
     },
 ]
 BOT_CONFIGS.sort(key=lambda b: b["order"])
 AI_BOT_CONFIGS = [c for c in BOT_CONFIGS if c["api_type"] != "none"]
 
+# ── Global state ─────────────────────────────────────────────────────────
+sessions: dict = {}
+chat_modes: dict = {}
+bot_apps: dict = {}
+processed_messages: set = set()
+active_conversation: dict = {}
+groq_rate_limited: dict = {}
+
 
 # =============================================================================
-# ASYNC AI CALLERS  (httpx, non-blocking)
+# AI CALLERS
 # =============================================================================
 
 async def call_anthropic(api_key, system, messages, model, temperature):
@@ -142,15 +140,23 @@ async def call_anthropic(api_key, system, messages, model, temperature):
         async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
                 "https://api.anthropic.com/v1/messages",
-                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                json={"model": model, "max_tokens": MAX_TOKENS, "system": system, "messages": messages, "temperature": temperature},
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": model, "max_tokens": MAX_TOKENS,
+                    "system": system, "messages": messages,
+                    "temperature": temperature,
+                },
             )
             if resp.status_code == 200:
                 return resp.json()["content"][0]["text"]
-            logger.error(f"Claude error {resp.status_code}: {resp.text[:100]}")
+            logger.error("Claude error %s: %s", resp.status_code, resp.text[:100])
             return None
     except Exception as e:
-        logger.error(f"Claude exception: {e}")
+        logger.error("Claude exception: %s", e)
         return None
 
 
@@ -167,10 +173,10 @@ async def call_deepseek(api_key, system, messages, model, temperature):
             )
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
-            logger.error(f"DeepSeek error {resp.status_code}: {resp.text[:100]}")
+            logger.error("DeepSeek error %s: %s", resp.status_code, resp.text[:100])
             return None
     except Exception as e:
-        logger.error(f"DeepSeek exception: {e}")
+        logger.error("DeepSeek exception: %s", e)
         return None
 
 
@@ -187,20 +193,17 @@ async def call_groq(api_key, system, messages, model, temperature):
             )
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"]
-            logger.error(f"Groq error {resp.status_code}: {resp.text[:100]}")
+            logger.error("Groq error %s: %s", resp.status_code, resp.text[:100])
             return None
     except Exception as e:
-        logger.error(f"Groq exception: {e}")
+        logger.error("Groq exception: %s", e)
         return None
 
 
 async def call_ai(config, messages):
-    k = config["api_key"]
-    s = config["prompt"]
-    m = config["model"]
-    t = config["temperature"]
+    k, s, m, t = config["api_key"], config["prompt"], config["model"], config["temperature"]
     api = config["api_type"]
-    logger.info(f"  📞 API call → {config['name']} | type={api} | model={m}")
+    logger.info("📞 API call → %s | model=%s", config["name"], m)
     if api == "anthropic":
         return await call_anthropic(k, s, messages, m, t)
     elif api == "deepseek":
@@ -211,7 +214,7 @@ async def call_ai(config, messages):
 
 
 # =============================================================================
-# SESSION (per-chat state)
+# SESSION
 # =============================================================================
 
 class ChatSession:
@@ -219,7 +222,7 @@ class ChatSession:
         self.chat_id = chat_id
         self.topic = topic
         self.max_rounds = max_rounds
-        self.conversation = []   # [{name, text}, ...]
+        self.conversation = []
         self.current_idx = 0
         self.round = 1
         self.active = True
@@ -238,17 +241,10 @@ class ChatSession:
             self.round += 1
 
     def get_next_config(self):
-        """Return the config of the bot that will speak after the current one."""
         next_idx = self.current_idx + 1
         if next_idx >= len(AI_BOT_CONFIGS):
-            # Next round, first bot speaks
             return AI_BOT_CONFIGS[0]
         return AI_BOT_CONFIGS[next_idx]
-
-    def get_mode_instruction(self):
-        """Return the mode instruction string for this chat's current mode."""
-        mode = chat_modes.get(self.chat_id, "normal")
-        return MODE_INSTRUCTIONS.get(mode, "")
 
     def build_prompt(self, config):
         history = ""
@@ -258,21 +254,18 @@ class ChatSession:
                 history += f"[{e['name']}]: {e['text']}\n\n"
             history += "============================\n\n"
 
-        is_final_round = self.round == self.max_rounds and self.current_idx == len(AI_BOT_CONFIGS) - 1
-        if is_final_round:
+        mode = chat_modes.get(self.chat_id, "normal")
+        mode_instruction = MODE_INSTRUCTIONS.get(mode, "")
+
+        is_final = self.round == self.max_rounds and self.current_idx == len(AI_BOT_CONFIGS) - 1
+        if is_final:
             round_instruction = (
-                "This is your final round — conclude and synthesize the conversation.\n"
-                "Speak in simple clear English. No academic words. Max 3 sentences. "
-                "Make your point like you're texting a smart friend. "
-                "Structure: your opinion → your reasoning → a concrete example or counter. "
-                "Summarise your key points, respond to counter-arguments, and "
-                "offer a final, thoughtful perspective on the topic."
+                "This is your final round — conclude and synthesize. "
+                "Simple English, max 3 sentences. Summarise your key points and offer a final perspective."
             )
         else:
             round_instruction = (
-                "Speak in simple clear English. No academic words. Max 3 sentences. "
-                "Make your point like you're texting a smart friend. "
-                "Structure: your opinion → your reasoning → a concrete example or counter. "
+                "Simple English, max 3 sentences. "
                 "Directly address what the previous speaker said — agree or disagree with specific reasoning."
             )
 
@@ -282,18 +275,13 @@ class ChatSession:
             f"a direct question about something they said or an idea you want them to explore."
         )
 
-        mode_instruction = self.get_mode_instruction()
-
-        # Determine previous speaker
-        previous_speaker = ""
+        respond_instruction = ""
         if self.conversation:
-            previous_speaker = self.conversation[-1]["name"]
+            prev = self.conversation[-1]["name"]
             respond_instruction = (
-                f"You MUST directly respond to what {previous_speaker} just said before adding your own point. "
+                f"You MUST directly respond to what {prev} just said before adding your own point. "
                 f"Quote or reference their specific argument."
             )
-        else:
-            respond_instruction = ""
 
         return (
             f"TOPIC: {self.topic}\n\n{history}"
@@ -307,21 +295,11 @@ class ChatSession:
         )
 
 
-# ── Global stores ───────────────────────────────────────────────────────
-sessions = {}        # chat_id -> ChatSession
-chat_modes = {}      # chat_id -> mode string (e.g. "sarcastic", "eli5")
-bot_apps = {}        # name -> Application
-processed_messages = set()  # deduplicate handling of same message_id
-active_conversation = {}  # chat_id -> bot name currently in conversation
-groq_rate_limited = {}  # chat_id -> timestamp when Groq last notified rate limit
-
-
 # =============================================================================
 # HELPERS
 # =============================================================================
 
 def split_response(text, max_size=3500):
-    """Split on paragraph boundaries."""
     if len(text) <= max_size:
         return [text]
     chunks = []
@@ -341,7 +319,6 @@ def split_response(text, max_size=3500):
 
 
 async def keep_typing(bot, chat_id, stop_event):
-    """Send typing indicator every 1 s until stopped."""
     while not stop_event.is_set():
         try:
             await bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -351,200 +328,130 @@ async def keep_typing(bot, chat_id, stop_event):
 
 
 def get_mode_instruction(chat_id):
-    """Get the mode instruction string for a given chat, defaulting to 'normal'."""
     mode = chat_modes.get(chat_id, "normal")
     return MODE_INSTRUCTIONS.get(mode, "")
 
 
 async def safe_send(bot, chat_id, text):
-    """Send a message with Markdown parsing; fall back to plain text on BadRequest (400) error."""
     try:
         await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
     except BadRequest:
-        # Telegram doesn't like some Markdown chars; retry without formatting
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+        await bot.send_message(chat_id=chat_id, text=text)
 
 
-async def safe_send_markdown(bot, chat_id, text, **kwargs):
-    """Send a message with Markdown parsing; fall back to plain text on error."""
-    try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown", **kwargs)
-    except Exception:
-        # Telegram doesn't like some Markdown chars; retry without formatting
-        await bot.send_message(chat_id=chat_id, text=text, **kwargs)
+def _track_message(msg_id: int) -> bool:
+    """Return True if this message_id is new (not yet seen). Caps set size."""
+    global processed_messages
+    if msg_id in processed_messages:
+        return False
+    processed_messages.add(msg_id)
+    if len(processed_messages) > MAX_PROCESSED_MESSAGES:
+        # Drop oldest half
+        keep = sorted(processed_messages)[-MAX_PROCESSED_MESSAGES // 2:]
+        processed_messages = set(keep)
+    return True
 
 
 def is_directly_addressed(text, bot_name):
-    """Check if a bot is directly addressed (not just mentioned in passing).
-    Returns True if the name appears at the start of the message, or follows
-    greeting/request patterns like 'hey [name]', 'hi [name]', 'ask [name]',
-    '[name] what do you think', '[name] can you'."""
     text_lower = text.lower()
     name_lower = bot_name.lower()
-    emoji = ""
-    if bot_name == "BigBro":
-        emoji = "👁"
-    elif bot_name == "Claude":
-        emoji = "🟣"
-    elif bot_name == "DeepSeek":
-        emoji = "🔴"
-    elif bot_name == "Groq":
-        emoji = "🔵"
+    icons = {"BigBro": "👁", "Claude": "🟣", "DeepSeek": "🔴", "Groq": "🔵"}
+    emoji = icons.get(bot_name, "")
 
-    # Direct opening: message starts with the name
     if text_lower.startswith(name_lower) or (emoji and text.startswith(emoji)):
         return True
-
-    # Greeting + name patterns
-    greeting_patterns = [f"hey {name_lower}", f"hi {name_lower}", f"hello {name_lower}"]
-    for pattern in greeting_patterns:
+    for pattern in [f"hey {name_lower}", f"hi {name_lower}", f"hello {name_lower}"]:
         if pattern in text_lower:
             return True
-
-    # Request patterns
-    request_patterns = [f"{name_lower} what", f"{name_lower} can", f"ask {name_lower}", f"{name_lower}, what", f"{name_lower} do you"]
-    for pattern in request_patterns:
+    for pattern in [f"{name_lower} what", f"{name_lower} can", f"ask {name_lower}",
+                    f"{name_lower}, what", f"{name_lower} do you"]:
         if pattern in text_lower:
             return True
-
-    # Question directed at bot: "bigbro, ..." or "bigbro ..."
-    short_variants = []
-    if bot_name == "BigBro":
-        short_variants = ["big bro"]
-    if any(f"{v}," in text_lower or f"{v} " in text_lower.split()[0:2] for v in [name_lower] + short_variants if v):
-        first_words = text_lower.split()[:3]
-        if any(v in first_words for v in [name_lower] + short_variants if v):
-            return True
-
     return False
 
 
-async def safe_reply_markdown(update, text, **kwargs):
-    """Reply to a message with Markdown parsing; fall back to plain text on error."""
-    try:
-        await update.message.reply_text(text, parse_mode="Markdown", **kwargs)
-    except Exception:
-        await update.message.reply_text(text, **kwargs)
-
-
 # =============================================================================
-# CASUAL GROUP-CHAT REPLY (triggered by any human message)
+# CASUAL REPLY
 # =============================================================================
-
 
 async def reply_to_human(chat_id, human_message, target_bot=None):
-    """All 3 AI bots + BigBro reply casually to a human message SIMULTANEOUSLY via asyncio.gather().
-    If target_bot is set, only that bot replies."""
     mode_instruction = get_mode_instruction(chat_id)
-    history = await get_history(chat_id, limit=1000)
+    history = await get_history(chat_id, limit=50)
     history_text = format_history_for_prompt(history, "")
 
     async def call_and_send_ai(config):
-        if target_bot and config['name'].lower() != target_bot.lower():
+        if target_bot and config["name"].lower() != target_bot.lower():
             return
         bot_app = bot_apps.get(config["name"])
         if not bot_app:
             return
 
         other_names = [b["name"] for b in AI_BOT_CONFIGS if b["name"] != config["name"]]
-
         prompt = (
-            f"You are {config['name']}, a highly intelligent AI agent in a group chat with other AI agents "
-            f"({' and '.join(other_names)}) and humans. You have a distinct personality and high IQ. "
-            f"Rules: Never give presentations or bullet points. Max 3-4 sentences per response. "
-            f"Structure: your opinion → your reasoning → a concrete example or counter. "
-            f"In discussions, directly address what the previous speaker said — agree or disagree with specific reasoning. "
-            f"Be sharp, direct, and intellectually honest. No filler words, no hedging, no 'great point'. "
-            f"Speak like a genius who respects others' intelligence.\n\n"
+            f"You are {config['name']}, a highly intelligent AI in a group chat "
+            f"with {' and '.join(other_names)} and humans.\n"
+            f"Rules: No bullet points. Max 3-4 sentences. Be sharp and direct.\n\n"
             f"{history_text}\n\n"
-            f"A message was just sent to the group:\n"
-            f"\"{human_message}\"\n\n"
-            f"Reply naturally in 2-3 short sentences."
-            f"{mode_instruction}"
+            f"Human message: \"{human_message}\"\n\n"
+            f"Reply naturally in 2-3 short sentences.{mode_instruction}"
         )
 
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(keep_typing(bot_app.bot, chat_id, stop_typing))
-
-        logger.info(f"  💬 {config['icon']} {config['name']} replying to human message...")
         response = await call_ai(config, [{"role": "user", "content": prompt}])
-
         stop_typing.set()
         await typing_task
 
         if response:
             response = response.strip()
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=f"{config['icon']} {response}",
-            )
-            await save_message(chat_id, config['name'], response, is_bot=True)
-            logger.info(f"  ✅ {config['icon']} {config['name']} replied ✓")
+            await bot_app.bot.send_message(chat_id=chat_id, text=f"{config['icon']} {response}")
+            await save_message(chat_id, config["name"], response, is_bot=True)
         else:
-            logger.info(f"  ⚠️ {config['icon']} {config['name']} API skip for casual reply")
-            # Groq rate-limit notification — once per 60 seconds per chat
-            if config['name'] == 'Groq':
+            if config["name"] == "Groq":
                 now = time.time()
-                last_notified = groq_rate_limited.get(chat_id, 0)
-                if now - last_notified > 60:
+                if now - groq_rate_limited.get(chat_id, 0) > 60:
                     groq_rate_limited[chat_id] = now
                     await bot_app.bot.send_message(
                         chat_id=chat_id,
-                        text="🔵 Groq is taking a breather (rate limit). Back soon.",
+                        text="🔵 Groq is rate limited. Back soon.",
                     )
 
     async def call_and_send_bigbro():
-        """BigBro replies using DeepSeek API."""
         if target_bot and target_bot.lower() != "bigbro":
             return
         bot_app = bot_apps.get("BigBro")
         if not bot_app:
             return
-
         api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
         if not api_key:
-            logger.info("  ⚠️ 👁 BigBro skip — no DEEPSEEK_API_KEY")
             return
 
         prompt = (
-            "You are BigBro, a wise and caring friend in this group. Be warm and natural in casual chat. "
-            "Only share observations when genuinely useful. Never assume people are testing you or have hidden motives. "
-            "Respond to what was actually said, not what you think might be behind it.\n\n"
+            "You are BigBro, a wise and warm presence in this group. "
+            "Be natural and friendly. Reply in 1-2 sentences.\n\n"
             f"{history_text}\n\n"
-            f"A message was just sent to the group:\n"
-            f"\"{human_message}\"\n\n"
-            f"Reply in 1-2 sentences."
-            f"{mode_instruction}"
+            f"Human message: \"{human_message}\"\n\n"
+            f"Reply naturally.{mode_instruction}"
         )
 
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(keep_typing(bot_app.bot, chat_id, stop_typing))
-
-        logger.info("  💬 👁 BigBro replying to human message...")
         response = await call_deepseek(api_key, prompt, [{"role": "user", "content": human_message}], "deepseek-chat", 0.7)
-
         stop_typing.set()
         await typing_task
 
         if response:
             response = response.strip()
-            await bot_app.bot.send_message(
-                chat_id=chat_id,
-                text=f"👁 {response}",
-            )
+            await bot_app.bot.send_message(chat_id=chat_id, text=f"👁 {response}")
             await save_message(chat_id, "BigBro", response, is_bot=True)
-            logger.info("  ✅ 👁 BigBro replied ✓")
-        else:
-            logger.info("  ⚠️ 👁 BigBro API skip for casual reply")
 
-    # Collect all tasks: 3 AI bots + BigBro
     tasks = [call_and_send_ai(config) for config in AI_BOT_CONFIGS]
     tasks.append(call_and_send_bigbro())
     await asyncio.gather(*tasks)
 
 
 # =============================================================================
-# DISCUSSION ENGINE  (background task — does NOT block the handler)
+# DISCUSSION ENGINE
 # =============================================================================
 
 async def run_discussion(session: ChatSession):
@@ -556,12 +463,10 @@ async def run_discussion(session: ChatSession):
             continue
 
         prompt = session.build_prompt(config)
-
-        # Background typing indicator
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(keep_typing(bot_app.bot, session.chat_id, stop_typing))
 
-        logger.info(f"\n  🎤 {config['icon']} {config['name']} (R{session.round}/{session.max_rounds}) thinking...")
+        logger.info("🎤 %s %s (R%s/%s) thinking...", config["icon"], config["name"], session.round, session.max_rounds)
         response = await call_ai(config, [{"role": "user", "content": prompt}])
 
         stop_typing.set()
@@ -576,63 +481,45 @@ async def run_discussion(session: ChatSession):
                 await asyncio.sleep(0.5)
                 await bot_app.bot.send_message(chat_id=session.chat_id, text=chunk)
             session.conversation.append({"name": config["name"], "text": response})
-            await save_message(session.chat_id, config['name'], response, is_bot=True)
-            logger.info(f"  ✅ {config['icon']} {config['name']} ✓ ({len(response)} chars)")
+            await save_message(session.chat_id, config["name"], response, is_bot=True)
         else:
             await safe_send(bot_app.bot, session.chat_id, f"{config['icon']} *{config['name']}* — ⚠️ API skip")
-
-            logger.info(f"  ⚠️ {config['icon']} {config['name']} skipped")
 
         if not session.active:
             break
         session.advance()
         await asyncio.sleep(0.5)
 
-    # ── Complete ──────────────────────────────────────────────────────────
     if session.is_done() and session.active:
         bigbro_bot = bot_apps.get("BigBro")
         if not bigbro_bot:
             session.active = False
-            if session.chat_id in sessions and sessions[session.chat_id] is session:
-                del sessions[session.chat_id]
+            sessions.pop(session.chat_id, None)
             return
 
         wc = sum(len(e["text"].split()) for e in session.conversation)
         await safe_send(
-            bigbro_bot.bot,
-            session.chat_id,
+            bigbro_bot.bot, session.chat_id,
             (
                 f"👁 *Discussion Complete!*\n\n"
                 f"📌 *Topic:* {session.topic}\n"
-                f"💬 {len(session.conversation)} responses\n"
-                f"📝 ~{wc} words\n\n"
-                f"🤔 Now generating structured conclusion & asking AIs to vote..."
+                f"💬 {len(session.conversation)} responses | ~{wc} words\n\n"
+                f"🤔 Generating summary and asking AIs to vote..."
             ),
         )
 
-        # 1) Structured summary of each AI's main points
         summary = await generate_structured_summary(session)
         if summary:
             await safe_send(bigbro_bot.bot, session.chat_id, summary)
-        else:
-            await bigbro_bot.bot.send_message(
-                chat_id=session.chat_id,
-                text="❌ Could not generate summary.",
-            )
 
-        # 2) Ask each AI to vote for the strongest argument
         await asyncio.sleep(0.5)
         await run_voting(session, bigbro_bot)
-
         session.active = False
 
-    if session.chat_id in sessions and sessions[session.chat_id] is session:
-        del sessions[session.chat_id]
+    sessions.pop(session.chat_id, None)
 
 
-async def generate_structured_summary(session):
-    """Ask DeepSeek to produce a summary of each AI's main points."""
-    mode_instruction = get_mode_instruction(session.chat_id)
+async def generate_structured_summary(session: ChatSession):
     text = "\n\n".join(f"[{e['name']}]: {e['text']}" for e in session.conversation)
     prompt = (
         f"Read this discussion and write a simple summary a normal person can understand in 30 seconds.\n\n"
@@ -641,25 +528,22 @@ async def generate_structured_summary(session):
         f"🟣 Claude thought: [1 simple sentence]\n"
         f"🔴 DeepSeek thought: [1 simple sentence]\n"
         f"🔵 Groq thought: [1 simple sentence]\n\n"
-        f"🏆 Strongest argument: [which AI and why in 1 simple sentence]\n"
-        f"📌 Bottom line: [answer the original question in 1 simple sentence]\n\n"
+        f"🏆 Strongest argument: [which AI and why in 1 sentence]\n"
+        f"📌 Bottom line: [answer the original question in 1 sentence]\n\n"
         f"Use simple words. No jargon. Max 5 lines total."
-        f"{mode_instruction}"
     )
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
-        logger.info("  ⚠️ 👁 BigBro skip summary — no DEEPSEEK_API_KEY")
         return None
     resp = await call_deepseek(api_key, prompt, [{"role": "user", "content": prompt}], "deepseek-chat", 0.3)
     if resp:
-        return f"📋 *Summary of the Discussion*\n\n{resp.strip()}"
+        return f"📋 *Summary*\n\n{resp.strip()}"
     return None
 
 
-async def run_voting(session, bigbro_bot):
-    """Ask each AI to vote for the strongest argument (not their own). Tally & declare winner."""
+async def run_voting(session: ChatSession, bigbro_bot):
     text = "\n\n".join(f"[{e['name']}]: {e['text']}" for e in session.conversation)
-    votes = []  # [{voter, winner, reason}, ...]
+    votes = []
 
     for config in AI_BOT_CONFIGS:
         bot_app = bot_apps.get(config["name"])
@@ -668,50 +552,40 @@ async def run_voting(session, bigbro_bot):
 
         vote_prompt = (
             f"The discussion was about: {session.topic}\n"
-            f"Here are the arguments made:\n{text}\n"
+            f"Arguments:\n{text}\n\n"
             f"Who made the strongest argument — Claude, DeepSeek, or Groq? "
-            f"Answer in one sentence: '[Name] made the strongest argument because [one simple reason].'\n"
-            f"Important: You cannot vote for yourself. If you are Claude, you must vote for either DeepSeek or Groq."
+            f"Answer in one sentence: '[Name] made the strongest argument because [one reason].'\n"
+            f"You cannot vote for yourself."
         )
 
         stop_typing = asyncio.Event()
         typing_task = asyncio.create_task(keep_typing(bot_app.bot, session.chat_id, stop_typing))
-
-        logger.info(f"  🗳️ {config['icon']} {config['name']} voting...")
         response = await call_ai(config, [{"role": "user", "content": vote_prompt}])
-
         stop_typing.set()
         await typing_task
 
         if response:
-            votes.append({"voter": config["name"], "response": response.strip()})
-            logger.info(f"  ✅ {config['icon']} {config['name']} voted ✓")
-        else:
-            logger.info(f"  ⚠️ {config['icon']} {config['name']} vote skipped")
+            votes.append({"voter": config["name"], "icon": config["icon"], "response": response.strip()})
 
-    # ── Tally votes ──────────────────────────────────────────────────
     if not votes:
-        await safe_send(bigbro_bot.bot, session.chat_id, "❌ No votes could be collected.")
+        await safe_send(bigbro_bot.bot, session.chat_id, "❌ No votes collected.")
         return
 
     tally = {}
     vote_lines = []
-    winner_reason = ""  # store the reason from the winning vote
+    winner_reason = ""
+
     for v in votes:
-        voter = v["voter"]
         resp = v["response"]
-        # Parse winner from response: "[Name] made the strongest argument because [one simple reason]"
         winner = "Unknown"
         reason = ""
         for ai in AI_BOT_CONFIGS:
             if resp.lower().startswith(ai["name"].lower()):
                 winner = ai["name"]
-                # Extract reason after "because"
                 if "because" in resp.lower():
                     reason = resp.split("because", 1)[1].strip().rstrip(".")
                 break
         if winner == "Unknown":
-            # Fallback: search for any AI name in the response
             for ai in AI_BOT_CONFIGS:
                 if ai["name"].lower() in resp.lower():
                     winner = ai["name"]
@@ -719,56 +593,24 @@ async def run_voting(session, bigbro_bot):
                         reason = resp.split("because", 1)[1].strip().rstrip(".")
                     break
         tally[winner] = tally.get(winner, 0) + 1
-        voter_icon = AI_BOT_CONFIGS[[c['name'] for c in AI_BOT_CONFIGS].index(voter)]['icon']
-        vote_lines.append(f"{voter_icon} {voter} voted for: {winner}")
-        if winner == max(tally, key=tally.get) if tally else "" and not winner_reason:
+        vote_lines.append(f"{v['icon']} {v['voter']} voted for: {winner}")
+        if not winner_reason:
             winner_reason = reason
 
-    total_votes = len(votes)
+    winner_name = max(tally, key=tally.get)
+    winner_icon = next((ai["icon"] for ai in AI_BOT_CONFIGS if ai["name"] == winner_name), "")
+    declaration = f"🏆 Winner: {winner_icon} {winner_name} with {tally[winner_name]} vote(s)"
+    why_line = f"💡 Why: {winner_reason}" if winner_reason else ""
 
-    # Declare winner
-    if tally:
-        winner_name = max(tally, key=tally.get)
-        winner_icon = ""
-        for ai in AI_BOT_CONFIGS:
-            if ai["name"] == winner_name:
-                winner_icon = ai["icon"]
-                break
-        declaration = f"🏆 Winner: {winner_icon} {winner_name} with {tally[winner_name]} votes"
-        # Find reason from the winning vote
-        for v in votes:
-            resp = v["response"]
-            for ai in AI_BOT_CONFIGS:
-                if ai["name"] == winner_name and resp.lower().startswith(ai["name"].lower()):
-                    if "because" in resp.lower():
-                        winner_reason = resp.split("because", 1)[1].strip().rstrip(".")
-                    break
-    else:
-        declaration = "🤝 Tie — no clear winner"
+    result = "🗳 VOTES:\n" + "\n".join(vote_lines) + f"\n\n{declaration}"
+    if why_line:
+        result += f"\n{why_line}"
 
-    why_line = f"💡 Why: {winner_reason}" if winner_reason else "💡 Why: [1 sentence from the winning argument]"
+    await safe_send(bigbro_bot.bot, session.chat_id, result)
+    await update_leaderboard(winner_name, [ai["name"] for ai in AI_BOT_CONFIGS])
 
-    result_message = (
-        f"🗳 VOTES:\n"
-        + "\n".join(vote_lines)
-        + "\n\n" + declaration
-        + "\n" + why_line
-    )
-
-    await safe_send(bigbro_bot.bot, session.chat_id, result_message)
-
-    # Update leaderboard
-    if tally:
-        await update_leaderboard(winner_name, ["Claude", "DeepSeek", "Groq"])
-
-
-# =============================================================================
-# BIGBRO SUMMARY (uses Claude API with full history from Supabase)
-# =============================================================================
 
 async def generate_bigbro_summary(chat_id):
-    """Fetch full history from Supabase and generate a summary using DeepSeek API."""
-    mode_instruction = get_mode_instruction(chat_id)
     history = await get_history(chat_id, limit=1000)
     if not history:
         return None
@@ -777,14 +619,12 @@ async def generate_bigbro_summary(chat_id):
         f"Here is the conversation history from an AI group chat:\n\n{history_text}\n\n"
         f"Write a concise summary covering:\n"
         f"1. The main topics discussed\n"
-        f"2. Key points made by each participant (Claude 🟣, DeepSeek 🔴, Groq 🔵)\n"
+        f"2. Key points made by each participant\n"
         f"3. Any conclusions reached\n\n"
         f"Be thorough but concise. 3-5 paragraphs."
-        f"{mode_instruction}"
     )
     api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     if not api_key:
-        logger.info("  ⚠️ 👁 BigBro skip summary — no DEEPSEEK_API_KEY")
         return None
     resp = await call_deepseek(api_key, prompt, [{"role": "user", "content": prompt}], "deepseek-chat", 0.3)
     if resp:
@@ -793,25 +633,26 @@ async def generate_bigbro_summary(chat_id):
 
 
 # =============================================================================
-# BUILD INDIVIDUAL BOT
+# BOT BUILDER
 # =============================================================================
 
 def build_bot(config):
-    # ── BigBro — Judge / Controller ───────────────────────────────────────
+
     if config["name"] == "BigBro":
         app = Application.builder().token(config["telegram_token"]).build()
         bot_apps[config["name"]] = app
 
         async def cmd_start(update, context):
             await update.message.reply_text(
-                f"👁 *BigBro* — Discussion Judge ready!\n\n"
-                f"`/discuss <topic>` — start AI debate\n"
-                f"`/discuss rounds=N <topic>` — custom rounds (1-10)\n"
-                f"`/stop` — halt discussion\n"
-                f"`/summary` — generate summary with full history from database\n"
-                f"`/vote` — ask AIs to vote on the best argument\n\n"
-                f"I oversee the debates. The 3 AIs discuss, I judge. 🤖⚖️\n\n"
-                f"Add all 4 bots (@Claude, @DeepSeek, @Groq, @BigBro) to the group!",
+                "👁 *BigBro* — Discussion Judge ready!\n\n"
+                "`/discuss <topic>` — start AI debate\n"
+                "`/discuss rounds=N <topic>` — custom rounds (1-10)\n"
+                "`/stop` — halt discussion\n"
+                "`/summary` — full chat summary\n"
+                "`/vote` — ask AIs to vote\n"
+                "`/leaderboard` — all-time debate wins\n"
+                "`/topics` — get 5 debate topic ideas\n"
+                "`/challenge` — random 1v1 debate",
                 parse_mode="Markdown",
             )
 
@@ -820,29 +661,25 @@ def build_bot(config):
             if update.effective_user.id != ADMIN_ID:
                 await update.message.reply_text("⛔ Only the admin can start discussions.")
                 return
-            chat_id = update.effective_chat.id
 
-            # Clear any active conversation tracking
+            chat_id = update.effective_chat.id
             active_conversation.pop(chat_id, None)
 
-            # Don't allow two concurrent discussions in the same chat
             existing = sessions.get(chat_id)
             if existing and existing.active:
-                await update.message.reply_text("❌ A discussion is already running! Use `/stop` first.", parse_mode="Markdown")
+                await update.message.reply_text("❌ Discussion already running! Use `/stop` first.", parse_mode="Markdown")
                 return
 
             args = context.args
             if not args:
-                await update.message.reply_text("Example: `/discuss Is homeschooling better than school?`", parse_mode="Markdown")
+                await update.message.reply_text("Example: `/discuss Is AI smarter than humans?`", parse_mode="Markdown")
                 return
 
-            # Parse optional  rounds=N  prefix
             max_rounds = DEFAULT_ROUNDS
             topic_parts = list(args)
             if topic_parts and topic_parts[0].lower().startswith("rounds="):
                 try:
-                    max_rounds = int(topic_parts[0].split("=")[1])
-                    max_rounds = max(1, min(max_rounds, 10))
+                    max_rounds = max(1, min(int(topic_parts[0].split("=")[1]), 10))
                     topic_parts = topic_parts[1:]
                 except ValueError:
                     pass
@@ -853,46 +690,40 @@ def build_bot(config):
 
             topic = " ".join(topic_parts)
             names = " → ".join(f"{b['icon']}{b['name']}" for b in AI_BOT_CONFIGS)
+            current_mode = chat_modes.get(chat_id, "normal")
+            mode_line = f"🎭 *Mode:* {current_mode}\n" if current_mode != "normal" else ""
 
             session = ChatSession(chat_id, topic, max_rounds)
             sessions[chat_id] = session
 
-            # Show current mode if not normal
-            current_mode = chat_modes.get(chat_id, "normal")
-            mode_line = ""
-            if current_mode != "normal":
-                mode_line = f"🎭 *Mode:* {current_mode}\n"
-
             await update.message.reply_text(
-                f"👁 *Discussion Started by BigBro!*\n\n"
+                f"👁 *Discussion Started!*\n\n"
                 f"📌 *Topic:* {topic}\n"
                 f"👥 *Order:* {names}\n"
                 f"🔄 *{max_rounds} rounds each*\n"
-                f"{mode_line}"
-                f"\nStarting with {AI_BOT_CONFIGS[0]['icon']} {AI_BOT_CONFIGS[0]['name']}... ⏳\n\n"
+                f"{mode_line}\n"
+                f"Starting with {AI_BOT_CONFIGS[0]['icon']} {AI_BOT_CONFIGS[0]['name']}... ⏳\n\n"
                 f"Use `/stop` to cancel.",
                 parse_mode="Markdown",
             )
-
-            # Background task so the handler returns immediately
             session.task = asyncio.create_task(run_discussion(session))
 
         async def cmd_stop(update, context):
             sess = sessions.get(update.effective_chat.id)
             if sess and sess.active:
                 sess.active = False
-                await update.message.reply_text("🛑 👁 Discussion stopped by BigBro.")
+                await update.message.reply_text("🛑 Discussion stopped.")
             else:
                 await update.message.reply_text("No active discussion.")
 
         async def cmd_summary(update, context):
             chat_id = update.effective_chat.id
-            await update.message.reply_text("🤔 Generating summary with full history from database...")
+            await update.message.reply_text("🤔 Generating summary from full history...")
             summary = await generate_bigbro_summary(chat_id)
             if summary:
                 await safe_send(app.bot, chat_id, summary)
             else:
-                await update.message.reply_text("❌ Could not generate summary (no history or API unavailable).")
+                await update.message.reply_text("❌ Could not generate summary.")
 
         async def cmd_topics(update, context):
             chat_id = update.effective_chat.id
@@ -900,18 +731,15 @@ def build_bot(config):
             if not api_key:
                 await update.message.reply_text("❌ DeepSeek API key not configured.")
                 return
-
-            await update.message.reply_text("💡 Generating sharp discussion topics...")
+            await update.message.reply_text("💡 Generating topics...")
             prompt = (
-                "Generate 5 sharp, controversial, thought-provoking discussion topics for a group of highly intelligent AI agents. "
-                "Topics should spark genuine disagreement. "
-                "Format exactly like this:\n"
-                "1. [topic]\n2. [topic]\n3. [topic]\n4. [topic]\n5. [topic]\n"
+                "Generate 5 sharp, controversial, thought-provoking discussion topics for highly intelligent AI agents. "
+                "Format:\n1. [topic]\n2. [topic]\n3. [topic]\n4. [topic]\n5. [topic]\n"
                 "No explanations, just the topics."
             )
             resp = await call_deepseek(api_key, prompt, [{"role": "user", "content": prompt}], "deepseek-chat", 0.7)
             if resp:
-                await safe_send(app.bot, chat_id, f"💡 *Topics to discuss:*\n\n{resp.strip()}\n\nPick one and send /discuss <topic>")
+                await safe_send(app.bot, chat_id, f"💡 *Topics:*\n\n{resp.strip()}\n\nPick one and send /discuss <topic>")
             else:
                 await update.message.reply_text("❌ Could not generate topics.")
 
@@ -921,13 +749,7 @@ def build_bot(config):
             if not sess or not sess.conversation:
                 await update.message.reply_text("No discussion to vote on. Use `/discuss <topic>` first.", parse_mode="Markdown")
                 return
-
-            bigbro_bot = bot_apps.get("BigBro")
-            if not bigbro_bot:
-                await update.message.reply_text("❌ BigBro bot not available.")
-                return
-
-            await update.message.reply_text("🗳️ Asking each AI to vote on the best argument...")
+            await update.message.reply_text("🗳️ Asking AIs to vote...")
             await run_voting(sess, bot_apps["BigBro"])
 
         async def cmd_leaderboard(update, context):
@@ -937,58 +759,14 @@ def build_bot(config):
                 return
             sorted_bots = sorted(data.items(), key=lambda x: x[1]["wins"], reverse=True)
             medals = ["🥇", "🥈", "🥉"]
-            msg = "🏆 *ALL TIME DEBATE LEADERBOARD*\n\n"
+            msg = "🏆 *ALL TIME LEADERBOARD*\n\n"
             for i, (bot, stats) in enumerate(sorted_bots):
                 medal = medals[i] if i < 3 else "▪️"
                 pct = round(stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
                 msg += f"{medal} {bot} — {stats['wins']} wins / {stats['total']} debates ({pct}%)\n"
             await update.message.reply_text(msg, parse_mode="Markdown")
 
-        # BigBro also handles casual messages
-        async def handle_message(update, context):
-            msg_id = update.message.message_id
-            if msg_id in processed_messages:
-                return
-            processed_messages.add(msg_id)
-
-            chat_id = update.effective_chat.id
-            human_text = update.message.text
-            sender_name = update.message.from_user.first_name or "Human"
-            await save_message(chat_id, sender_name, human_text, is_bot=False)
-
-            # Context-aware targeting logic
-            text_lower = human_text.lower()
-
-            # Group-addressed keywords — all bots reply, clear conversation
-            group_keywords = ["everyone", " all ", "guys", "y'all", "yall", "what do you all think",
-                              "what does everyone", "to the group", "anyone"]
-            addressed_to_group = any(kw in text_lower for kw in group_keywords)
-
-            if addressed_to_group:
-                active_conversation.pop(chat_id, None)
-                target_bot = None
-            else:
-                # Check which bot is directly addressed (not just mentioned in passing)
-                target_bot = None
-                for bot_name in ["BigBro", "Claude", "DeepSeek", "Groq"]:
-                    if is_directly_addressed(human_text, bot_name):
-                        target_bot = bot_name
-                        break
-
-                if target_bot:
-                    # Directly addressed — start/switch conversation with that bot
-                    active_conversation[chat_id] = target_bot
-                elif chat_id in active_conversation:
-                    # No bot addressed but in an active conversation — continue with same bot
-                    target_bot = active_conversation[chat_id]
-                else:
-                    # New topic with no context — all bots reply
-                    pass
-
-            asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
-
         async def cmd_challenge(update, context):
-            import random
             chat_id = update.effective_chat.id
             bots = [c for c in BOT_CONFIGS if c["name"] != "BigBro"]
             chosen = random.sample(bots, 2)
@@ -1001,173 +779,122 @@ def build_bot(config):
             ]
             topic_pair = random.choice(topics)
             a, b = chosen
-            msg = (f"⚔️ *CHALLENGE ROUND!*\n\n"
-                   f"{a['icon']} {a['name']} must argue: *{topic_pair[0]}*\n"
-                   f"{b['icon']} {b['name']} must argue: *{topic_pair[1]}*\n\n"
-                   f"Starting in 3 seconds...")
-            await update.message.reply_text(msg, parse_mode="Markdown")
+            await update.message.reply_text(
+                f"⚔️ *CHALLENGE ROUND!*\n\n"
+                f"{a['icon']} {a['name']} argues: *{topic_pair[0]}*\n"
+                f"{b['icon']} {b['name']} argues: *{topic_pair[1]}*\n\n"
+                f"Starting in 3 seconds...",
+                parse_mode="Markdown",
+            )
             await asyncio.sleep(3)
-            topic = f"{topic_pair[0]} vs {topic_pair[1]}"
-            session = ChatSession(chat_id, topic, 2)
-            session.forced_order = [a, b]
+            session = ChatSession(chat_id, f"{topic_pair[0]} vs {topic_pair[1]}", 2)
             sessions[chat_id] = session
             session.task = asyncio.create_task(run_discussion(session))
 
+        async def handle_message(update, context):
+            if not _track_message(update.message.message_id):
+                return
+            chat_id = update.effective_chat.id
+            human_text = update.message.text
+            sender_name = update.message.from_user.first_name or "Human"
+            await save_message(chat_id, sender_name, human_text, is_bot=False)
+
+            text_lower = human_text.lower()
+            group_keywords = ["everyone", " all ", "guys", "y'all", "yall", "what do you all think", "anyone"]
+            addressed_to_group = any(kw in text_lower for kw in group_keywords)
+
+            if addressed_to_group:
+                active_conversation.pop(chat_id, None)
+                target_bot = None
+            else:
+                target_bot = None
+                for bot_name in ["BigBro", "Claude", "DeepSeek", "Groq"]:
+                    if is_directly_addressed(human_text, bot_name):
+                        target_bot = bot_name
+                        break
+                if target_bot:
+                    active_conversation[chat_id] = target_bot
+                elif chat_id in active_conversation:
+                    target_bot = active_conversation[chat_id]
+
+            asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
+
         app.add_handler(CommandHandler("start", cmd_start))
+        app.add_handler(CommandHandler("help", cmd_start))
         app.add_handler(CommandHandler("discuss", cmd_discuss))
-        app.add_handler(CommandHandler("topics", cmd_topics))
         app.add_handler(CommandHandler("stop", cmd_stop))
         app.add_handler(CommandHandler("summary", cmd_summary))
+        app.add_handler(CommandHandler("topics", cmd_topics))
         app.add_handler(CommandHandler("vote", cmd_vote))
         app.add_handler(CommandHandler("leaderboard", cmd_leaderboard))
         app.add_handler(CommandHandler("challenge", cmd_challenge))
-        app.add_handler(CommandHandler("help", cmd_start))
-        app.add_handler(CommandHandler("commands", cmd_start))
-        app.add_handler(CommandHandler("cancel", cmd_stop))
-
-        # Register message handler for casual replies (non-command text messages only)
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
         return app
 
-    # ── Non-BigBro bots (Claude, DeepSeek, Groq) — only /mode + casual handler ──
+    # ── AI bots (Claude, DeepSeek, Groq) ────────────────────────────────
     app = Application.builder().token(config["telegram_token"]).build()
     bot_apps[config["name"]] = app
 
     async def cmd_mode(update, context):
-        """Change the AI response mode for this chat."""
-        # Only the first AI bot in order handles /mode
         if config["order"] != 0:
             return
-
         chat_id = update.effective_chat.id
         args = context.args
-
         if not args:
-            # Show current mode
             current = chat_modes.get(chat_id, "normal")
-            modes_list = " | ".join(
-                f"`{m}`" if m != current else f"*`{m}`*" for m in MODE_NAMES
-            )
+            modes_list = " | ".join(f"`{m}`" if m != current else f"*`{m}`*" for m in MODE_NAMES)
             await update.message.reply_text(
-                f"🎭 Current mode: *{current}*\n\n"
-                f"Available modes:\n{modes_list}\n\n"
-                f"Usage: `/mode <mode_name>`",
+                f"🎭 Current mode: *{current}*\n\nAvailable: {modes_list}\n\nUsage: `/mode <name>`",
                 parse_mode="Markdown",
             )
             return
-
         mode = args[0].lower()
-
         if mode not in MODE_NAMES:
-            await update.message.reply_text(
-                f"❌ Unknown mode: `{mode}`\n\n"
-                f"Available modes: {', '.join(f'`{m}`' for m in MODE_NAMES)}",
-                parse_mode="Markdown",
-            )
+            await update.message.reply_text(f"❌ Unknown mode: `{mode}`\n\nAvailable: {', '.join(MODE_NAMES)}", parse_mode="Markdown")
             return
-
         chat_modes[chat_id] = mode
-
-        mode_descriptions = {
-            "normal": "✅ Reset to normal mode. AIs will respond with their default personalities.",
-            "sarcastic": "😏 *Sarcastic mode* activated! All AIs will respond with sharp, witty sarcasm.",
-            "eli5": "🧒 *ELI5 mode* activated! All AIs will explain things simply, like to a child.",
-            "disagree": "⚔️ *Disagree mode* activated! All AIs will challenge and contradict each other.",
+        descriptions = {
+            "normal": "✅ Reset to normal mode.",
+            "sarcastic": "😏 *Sarcastic mode* activated!",
+            "eli5": "🧒 *ELI5 mode* activated!",
+            "disagree": "⚔️ *Disagree mode* activated!",
         }
-
-        await update.message.reply_text(
-            f"🎭 Mode changed to *{mode}\n\n{mode_descriptions.get(mode, '')}",
-            parse_mode="Markdown",
-        )
-        logger.info(f"  🎭 Chat {chat_id} mode set to '{mode}'")
+        await update.message.reply_text(descriptions.get(mode, f"Mode set to {mode}"), parse_mode="Markdown")
 
     async def handle_message(update, context):
-        # Only the first AI bot triggers the casual reply cascade
         if config["order"] != 0:
             return
-
-        msg_id = update.message.message_id
-        if msg_id in processed_messages:
+        if not _track_message(update.message.message_id):
             return
-        processed_messages.add(msg_id)
-
         chat_id = update.effective_chat.id
         human_text = update.message.text
-
         sender_name = update.message.from_user.first_name or "Human"
         await save_message(chat_id, sender_name, human_text, is_bot=False)
 
-        # Context-aware targeting logic
         text_lower = human_text.lower()
-
-        # Group-addressed keywords — all bots reply, clear conversation
-        group_keywords = ["everyone", " all ", "guys", "y'all", "yall", "what do you all think",
-                          "what does everyone", "to the group", "anyone"]
+        group_keywords = ["everyone", " all ", "guys", "y'all", "yall", "what do you all think", "anyone"]
         addressed_to_group = any(kw in text_lower for kw in group_keywords)
 
         if addressed_to_group:
             active_conversation.pop(chat_id, None)
             target_bot = None
         else:
-            # Check which bot is directly addressed (not just mentioned in passing)
             target_bot = None
             for bot_name in ["BigBro", "Claude", "DeepSeek", "Groq"]:
                 if is_directly_addressed(human_text, bot_name):
                     target_bot = bot_name
                     break
-
             if target_bot:
-                # Directly addressed — start/switch conversation with that bot
                 active_conversation[chat_id] = target_bot
             elif chat_id in active_conversation:
-                # No bot mentioned but in an active conversation — continue with same bot
                 target_bot = active_conversation[chat_id]
-            else:
-                # New topic with no context — all bots reply
-                pass
 
-        # Launch background task so the handler returns immediately
         asyncio.create_task(reply_to_human(chat_id, human_text, target_bot=target_bot))
 
     app.add_handler(CommandHandler("mode", cmd_mode))
     app.add_handler(CommandHandler("start", cmd_mode))
-
-    # Register message handler for casual replies (non-command text messages only)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     return app
-
-
-# =============================================================================
-# LEADERBOARD
-# =============================================================================
-
-async def update_leaderboard(winner_name, all_participants):
-    for bot in all_participants:
-        wins = 1 if bot == winner_name else 0
-        await save_message(0, f"LEADERBOARD_UPDATE:{bot}:{wins}", "", is_bot=True)
-
-async def get_leaderboard():
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/messages",
-            headers={**SUPABASE_HEADERS, "Prefer": ""},
-            params={"sender": "like.LEADERBOARD_UPDATE:*", "order": "created_at.asc"}
-        )
-    if resp.status_code != 200:
-        return {}
-    records = {}
-    for msg in resp.json():
-        parts = msg["sender"].split(":")
-        if len(parts) == 3:
-            bot = parts[1]
-            wins = int(parts[2])
-            if bot not in records:
-                records[bot] = {"wins": 0, "total": 0}
-            records[bot]["wins"] += wins
-            records[bot]["total"] += 1
-    return records
 
 
 # =============================================================================
@@ -1176,69 +903,42 @@ async def get_leaderboard():
 
 async def main():
     print("\n" + "=" * 60)
-    print("  🧠  MULTI-AI GROUP CHAT — v3 with BigBro Judge")
+    print("  🧠  MULTI-AI GROUP CHAT — v4 Optimized")
     print("=" * 60)
-    print("  • Secrets: .env (gitignored)")
-    print("  • AI calls: httpx (async, non-blocking)")
-    print("  • BigBro controls /discuss /stop /summary /vote")
-    print("  • Casual chat: any human message → all 3 AIs + BigBro reply")
-    print("  • Features: /mode (on Claude/DeepSeek/Groq)")
-    print()
 
-    for c in BOT_CONFIGS:
-        tg_ok = "✅" if c["telegram_token"] else "❌"
-        api_ok = "✅" if c["api_key"] else "❌"
-        if c["name"] == "BigBro":
-            print(f"  👁 BigBro   TG: {tg_ok}")
-        else:
-            print(f"  {c['icon']} {c['name']:8s}  TG: {tg_ok}  API: {api_ok}  T={c['temperature']}")
-
-    if not all(c["telegram_token"] for c in BOT_CONFIGS):
-        print("\n⚠️  Missing tokens/keys! Check your .env file.")
+    missing = [c["name"] for c in BOT_CONFIGS if not c["telegram_token"]]
+    if missing:
+        print(f"\n⚠️  Missing Telegram tokens for: {', '.join(missing)}")
+        print("Check your Railway environment variables.")
         return
 
-    print("\n🚀 Starting bots...\n")
     apps = []
     for config in BOT_CONFIGS:
         app = build_bot(config)
         await app.initialize()
 
-        # Set commands per bot type
         if config["name"] == "BigBro":
             await app.bot.set_my_commands([
-                BotCommand("start",   "Welcome"),
-                BotCommand("discuss", "/discuss [rounds=N] <topic> — start debate"),
-                BotCommand("stop",    "Stop discussion"),
-                BotCommand("summary", "Generate summary with full history"),
-                BotCommand("vote",    "Ask AIs to vote on best argument"),
+                BotCommand("start", "Welcome & commands"),
+                BotCommand("discuss", "/discuss [rounds=N] <topic>"),
+                BotCommand("stop", "Stop discussion"),
+                BotCommand("summary", "Generate summary"),
+                BotCommand("vote", "Ask AIs to vote"),
+                BotCommand("leaderboard", "All-time wins"),
+                BotCommand("topics", "Get topic ideas"),
+                BotCommand("challenge", "Random 1v1 debate"),
             ])
         else:
             await app.bot.set_my_commands([
-                BotCommand("mode",   "/mode <sarcastic|eli5|disagree|normal>"),
+                BotCommand("mode", "/mode <sarcastic|eli5|disagree|normal>"),
             ])
 
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        if config["name"] == "BigBro":
-            print(f"  ✅ 👁 @BigBro — LIVE (Judge)")
-        else:
-            print(f"  ✅ {config['icon']} @{config['name']} — LIVE")
-        apps.append((config, app))
+        print(f"  ✅ {config['icon']} @{config['name']} — LIVE")
+        apps.append(app)
 
-    print()
-    print("=" * 60)
-    print("  ✅ ALL BOTS RUNNING!")
-    print()
-    print("  👁  @BigBro commands:")
-    print("       /discuss <topic>           — start debate (3 rounds)")
-    print("       /discuss rounds=5 ...      — custom rounds (1-10)")
-    print("       /stop                      — cancel discussion")
-    print("       /summary                   — AI summary from full history")
-    print("       /vote                      — AIs vote on best argument")
-    print()
-    print("  🤖  @Claude / @DeepSeek / @Groq:")
-    print("       /mode <mode>               — change AI style")
-    print("       💬 Any message             — all AIs + BigBro reply casually")
+    print("\n  ✅ ALL BOTS RUNNING!")
     print("=" * 60)
 
     try:
@@ -1249,7 +949,7 @@ async def main():
         print("\n👋 Stopping...")
         for s in list(sessions.values()):
             s.active = False
-        for _, app in reversed(apps):
+        for app in reversed(apps):
             await app.updater.stop()
             await app.stop()
             await app.shutdown()
