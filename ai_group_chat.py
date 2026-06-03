@@ -254,6 +254,10 @@ class ChatSession:
                 history += f"[{e['name']}]: {e['text']}\n\n"
             history += "============================\n\n"
 
+        position = ""
+        if hasattr(self, 'assigned_positions') and config['name'] in self.assigned_positions:
+            position = f"\nYou MUST argue this position: {self.assigned_positions[config['name']]}\nDo NOT switch sides under any circumstances.\n"
+
         mode = chat_modes.get(self.chat_id, "normal")
         mode_instruction = MODE_INSTRUCTIONS.get(mode, "")
 
@@ -284,7 +288,7 @@ class ChatSession:
             )
 
         return (
-            f"TOPIC: {self.topic}\n\n{history}"
+            f"TOPIC: {self.topic}\n\n{history}{position}"
             f"It is YOUR turn to speak, {config['name']}.\n"
             f"Round {self.round}/{self.max_rounds}.\n\n"
             f"{respond_instruction}\n\n"
@@ -457,6 +461,10 @@ async def reply_to_human(chat_id, human_message, target_bot=None):
 async def run_discussion(session: ChatSession):
     while session.active and not session.is_done():
         config = session.get_next_bot()
+        participants = getattr(session, 'participants', AI_BOT_CONFIGS)
+        if config not in participants:
+            session.advance()
+            continue
         bot_app = bot_apps.get(config["name"])
         if not bot_app:
             session.advance()
@@ -788,6 +796,11 @@ def build_bot(config):
             )
             await asyncio.sleep(3)
             session = ChatSession(chat_id, f"{topic_pair[0]} vs {topic_pair[1]}", 2)
+            session.assigned_positions = {
+                a["name"]: topic_pair[0],
+                b["name"]: topic_pair[1],
+            }
+            session.participants = [a, b]
             sessions[chat_id] = session
             session.task = asyncio.create_task(run_discussion(session))
 
